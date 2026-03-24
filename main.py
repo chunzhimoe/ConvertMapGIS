@@ -10,7 +10,7 @@ from PyQt5.QtCore import Qt, QUrl, QThread, pyqtSignal, QCoreApplication
 from PyQt5.QtGui import QDesktopServices, QIcon, QIntValidator
 from PyQt5.QtWidgets import (
     QFrame, QApplication, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, QTextEdit,
-    QLineEdit, QButtonGroup, QRadioButton, QDoubleValidator
+    QLineEdit, QButtonGroup, QRadioButton
 )
 from qfluentwidgets import (
     FluentWindow, SubtitleLabel, FluentIcon as FIF, BodyLabel, PushButton, CheckBox, InfoBar, InfoBarPosition,
