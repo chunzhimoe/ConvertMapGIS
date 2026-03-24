@@ -14,12 +14,13 @@ jobs:
 
     steps:
     - name: 检出代码
-      uses: actions/checkout@v3
+      run: |
+        git clone https://github.com/${{ github.repository }}.git .
+        git checkout ${{ github.sha }}
 
     - name: 设置Python环境
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+      run: |
+        python --version
 
     - name: 安装依赖
       run: |
@@ -39,14 +40,38 @@ jobs:
       run: |
         powershell Compress-Archive -Path dist/* -DestinationPath ConvertMapGIS-${{ github.ref_name }}.zip
 
-    - name: 上传构建产物
-      uses: actions/upload-artifact@v4
-      with:
-        name: dist
-        path: dist/
-
     - name: 发布到GitHub Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: ConvertMapGIS-${{ github.ref_name }}.zip
-        token: ${{ secrets.GITHUB_TOKEN }} 
+      run: |
+        $tag = "${{ github.ref_name }}"
+        $zipFile = "ConvertMapGIS-${tag}.zip"
+        $repoApi = "https://api.github.com/repos/${{ github.repository }}"
+        $headers = @{
+          "Authorization" = "Bearer ${{ secrets.GITHUB_TOKEN }}"
+          "Accept"        = "application/vnd.github+json"
+          "X-GitHub-Api-Version" = "2022-11-28"
+        }
+
+        # 创建 Release（如果已存在则忽略错误）
+        $releaseBody = @{
+          tag_name = $tag
+          name     = $tag
+          draft    = $false
+          prerelease = $false
+        } | ConvertTo-Json
+        try {
+          $release = Invoke-RestMethod -Uri "$repoApi/releases" -Method Post `
+            -Headers $headers -Body $releaseBody -ContentType "application/json"
+        } catch {
+          # Release 已存在，查询它
+          $release = Invoke-RestMethod -Uri "$repoApi/releases/tags/$tag" `
+            -Headers $headers
+        }
+
+        # 上传 zip 资产
+        $uploadUrl = $release.upload_url -replace '\{.*\}', ''
+        $uploadUrl = "${uploadUrl}?name=${zipFile}"
+        $fileBytes = [System.IO.File]::ReadAllBytes($zipFile)
+        Invoke-RestMethod -Uri $uploadUrl -Method Post `
+          -Headers $headers -Body $fileBytes `
+          -ContentType "application/octet-stream"
+      shell: powershell
