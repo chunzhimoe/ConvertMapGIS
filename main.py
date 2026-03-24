@@ -82,6 +82,30 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                     reader = pymapgis.MapGisReader(mapgis_file, **kwargs)
                     file_base = os.path.splitext(os.path.basename(mapgis_file))[0]
                     file_ext = os.path.splitext(mapgis_file)[1][1:].upper()
+
+                    # 输出坐标系检测结果日志
+                    det = getattr(reader, 'crs_detection', None)
+                    if det:
+                        epsg = det.get('detected_epsg')
+                        conf = det.get('confidence', 'low')
+                        datum = det.get('datum', '')
+                        proj_desc = det.get('proj_desc', '')
+                        cm = det.get('central_meridian')
+                        note = det.get('note', '')
+                        cm_str = f' | 中央经线: {cm:.1f}°' if cm is not None else ''
+                        if epsg and conf == 'high':
+                            self.log_signal.emit(
+                                f"🔍 坐标系自动检测 | 文件: {os.path.basename(mapgis_file)}"
+                                f" | 基准: {datum} | 投影: {proj_desc}{cm_str}"
+                                f" | 匹配 EPSG: {epsg}"
+                            )
+                        elif note:
+                            self.log_signal.emit(
+                                f"🔍 坐标系自动检测 | 文件: {os.path.basename(mapgis_file)}"
+                                f" | 基准: {datum} | 投影: {proj_desc}{cm_str}"
+                                f" | ⚠️ {note}"
+                            )
+
                     # 检查crs为空但未抛异常的特殊情况
                     if hasattr(reader, 'crs') and reader.crs == '':
                         self.log_signal.emit(

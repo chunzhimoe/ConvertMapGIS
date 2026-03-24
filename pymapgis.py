@@ -10,6 +10,75 @@ import shapely
 from pyproj import CRS
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 坐标系自动检测：椭球体 → 地理坐标系 EPSG
+# ──────────────────────────────────────────────────────────────────────────────
+_GEO_EPSG = {
+    1:   4214,   # Krasovsky  → Beijing 1954
+    16:  4214,   # Krasovsky (alt)
+    2:   4610,   # IAG75      → Xian 1980
+    7:   4326,   # WGS84
+    9:   4984,   # WGS72
+    116: 4555,   # Clarke 1880 → New Beijing
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 高斯-克吕格 EPSG 查找表
+# 结构：{椭球体代码: {中央经线整度数: (6度带EPSG或None, 3度带EPSG或None)}}
+# 当两种带宽都有对应 EPSG 时，无法从文件自动区分，置为 None 让用户自判断。
+# ──────────────────────────────────────────────────────────────────────────────
+_GK_EPSG = {
+    # Beijing 1954 (ellipsoid=1 or 16)
+    # 无官方6度带 EPSG，只有3度带 CM 系列
+    1: {
+        75:  (None, 2422), 78:  (None, 2423), 81:  (None, 2424),
+        84:  (None, 2425), 87:  (None, 2426), 90:  (None, 2427),
+        93:  (None, 2428), 96:  (None, 2429), 99:  (None, 2430),
+        102: (None, 2431), 105: (None, 2432), 108: (None, 2433),
+        111: (None, 2434), 114: (None, 2435), 117: (None, 2436),
+        120: (None, 2437), 123: (None, 2438), 126: (None, 2439),
+        129: (None, 2440), 132: (None, 2441), 135: (None, 2442),
+    },
+    16: {  # 与 1 相同，引用同一份数据
+        75:  (None, 2422), 78:  (None, 2423), 81:  (None, 2424),
+        84:  (None, 2425), 87:  (None, 2426), 90:  (None, 2427),
+        93:  (None, 2428), 96:  (None, 2429), 99:  (None, 2430),
+        102: (None, 2431), 105: (None, 2432), 108: (None, 2433),
+        111: (None, 2434), 114: (None, 2435), 117: (None, 2436),
+        120: (None, 2437), 123: (None, 2438), 126: (None, 2439),
+        129: (None, 2440), 132: (None, 2441), 135: (None, 2442),
+    },
+    # Xian 1980 (ellipsoid=2)
+    # 6度带 CM 系列：2338-2348；3度带 CM 系列：2370-2390
+    # 当 CM % 6 == 0（即75/81/87/…/135）时两者均有，无法自动区分，返回 None。
+    # 当 CM % 3 == 0 但 CM % 6 != 0（即78/84/90/…/132）时只有3度带，返回唯一 EPSG。
+    2: {
+        75:  (2338, None), 78:  (None, 2371), 81:  (2339, None),
+        84:  (None, 2373), 87:  (2340, None), 90:  (None, 2375),
+        93:  (2341, None), 96:  (None, 2377), 99:  (2342, None),
+        102: (None, 2379), 105: (2343, None), 108: (None, 2381),
+        111: (2344, None), 114: (None, 2383), 117: (2345, None),
+        120: (None, 2385), 123: (2346, None), 126: (None, 2387),
+        129: (2347, None), 132: (None, 2389), 135: (2348, None),
+    },
+    # New Beijing (ellipsoid=116)
+    # 6度带 CM 系列：4579-4589；3度带 CM 系列：4782-4822
+    116: {
+        75:  (4579, None), 78:  (None, 4783), 81:  (4580, None),
+        84:  (None, 4785), 87:  (4581, None), 90:  (None, 4787),
+        93:  (4582, None), 96:  (None, 4789), 99:  (4583, None),
+        102: (None, 4791), 105: (4584, None), 108: (None, 4793),
+        111: (4585, None), 114: (None, 4795), 117: (4586, None),
+        120: (None, 4797), 123: (4587, None), 126: (None, 4799),
+        129: (4588, None), 132: (None, 4801), 135: (4589, None),
+    },
+}
+
+# CGCS2000：ellipsoid 字段在文件里实际值尚未确认，暂不加入自动检测
+# 若确认字段值后，可按相同结构添加：
+# 6度带 CM 系列：4502-4512；3度带 CM 系列：4534-4554
+
+
 class MapGisReader:
     """
     MapGIS 文件读取器，支持点、线、面要素的解析与转换。
@@ -19,10 +88,19 @@ class MapGisReader:
         self.wkid = wkid
         self.coordinate_scale = scale_factor if scale_factor is not None else None
         self.filepath = filepath
+        # 原始元数据（由 _parse_crs 填充，供 _detect_wkid_from_metadata 使用）
+        self._raw_proj_type = None
+        self._raw_ellipsoid = None
+        self._raw_central_meridian = None
+        # 自动检测结果（dict，供调用方查询）
+        self.crs_detection = None
         self.file = open(filepath, 'rb')
         self.shape_type = self._detect_shape_type()
         self._read_headers()
         self._parse_feature_data()
+        # 当调用方未手动指定 wkid 时，尝试从文件元数据自动匹配 EPSG
+        if self.wkid is None:
+            self._apply_auto_detected_crs()
         self._build_geodataframe()
 
     def _detect_shape_type(self):
@@ -430,6 +508,9 @@ class MapGisReader:
         self.file.seek(109)
         proj_type = ord(self.file.read(1))
         ellipsoid = ord(self.file.read(1))
+        # 保存原始元数据供自动检测使用
+        self._raw_proj_type = proj_type
+        self._raw_ellipsoid = ellipsoid
         self.file.seek(143)
 
         # 读取比例尺：优先使用调用方传入的 scale_factor，否则从文件读取
@@ -479,6 +560,7 @@ class MapGisReader:
                 self.file.seek(151)
                 cl = struct.unpack('1d', self.file.read(8))[0]
                 cl = int(str(cl).split('.')[0][:-4]) + int(str(cl).split('.')[0][-4:-2]) / 60.0 + int(str(cl).split('.')[0][-2:]) / 60.0 / 60
+                self._raw_central_meridian = cl  # 保存供自动检测使用
                 self.crs = CRS('+proj=tmerc' + f' +lat_0=0 +lon_0={cl} +k=1 +x_0=500000 +y_0=0 ' + ellip_dict[ellipsoid] + ' +units=m +no_defs')
             elif proj_type == 0:
                 # 地理坐标系
@@ -495,6 +577,120 @@ class MapGisReader:
         if self.wkid is not None:
             proj = CRS.from_epsg(self.wkid)
             self.crs = CRS(proj.to_wkt())
+
+    def _detect_wkid_from_metadata(self):
+        """根据文件元数据推断 EPSG 代码。
+
+        返回 dict，结构如下：
+          detected_epsg  : int 或 None  —— 唯一识别到的 EPSG；None 表示无法确定
+          confidence     : 'high' | 'medium' | 'low'
+          datum          : str  —— 基准面名称
+          proj_desc      : str  —— 投影类型描述
+          central_meridian: float 或 None
+          note           : str  —— 歧义或无法识别时的说明
+        """
+        pt  = self._raw_proj_type
+        ell = self._raw_ellipsoid
+        cm  = self._raw_central_meridian
+
+        # 元数据未填充时（理论上不应发生），返回低置信空结果
+        if pt is None or ell is None:
+            return {
+                'detected_epsg': None, 'confidence': 'low',
+                'datum': '未知', 'proj_desc': '未知',
+                'central_meridian': None,
+                'note': '元数据未解析，无法自动检测',
+            }
+
+        _DATUM_NAME = {
+            1:   'Beijing_1954',
+            16:  'Beijing_1954',
+            2:   'Xian_1980',
+            7:   'WGS84',
+            9:   'WGS72',
+            116: 'New_Beijing',
+        }
+        _PROJ_DESC = {
+            0: '地理坐标系',
+            2: 'Lambert等其他投影',
+            3: 'Lambert等其他投影',
+            5: '高斯-克吕格',
+        }
+
+        result = {
+            'detected_epsg':    None,
+            'confidence':       'low',
+            'datum':            _DATUM_NAME.get(ell, f'未知椭球体({ell})'),
+            'proj_desc':        _PROJ_DESC.get(pt, f'未知投影类型({pt})'),
+            'central_meridian': cm,
+            'note':             '',
+        }
+
+        # ── 地理坐标系 ──────────────────────────────────────────────────────
+        if pt == 0:
+            epsg = _GEO_EPSG.get(ell)
+            if epsg:
+                result['detected_epsg'] = epsg
+                result['confidence']    = 'high'
+            else:
+                result['note'] = '椭球体类型不在已知列表，无法自动匹配地理坐标系 EPSG'
+            return result
+
+        # ── 高斯-克吕格 ─────────────────────────────────────────────────────
+        if pt == 5:
+            if cm is None:
+                result['note'] = '未能读取中央经线，无法自动匹配'
+                return result
+            if ell not in _GK_EPSG:
+                result['note'] = f'椭球体 {ell} 暂未收录高斯-克吕格 EPSG 映射表'
+                return result
+
+            cm_int = int(round(cm))
+            row = _GK_EPSG[ell].get(cm_int)
+            if row is None:
+                result['note'] = f'中央经线 {cm_int}° 不在映射表中'
+                return result
+
+            epsg_6, epsg_3 = row
+            if epsg_6 is not None and epsg_3 is None:
+                # 只有6度带
+                result['detected_epsg'] = epsg_6
+                result['confidence']    = 'high'
+            elif epsg_3 is not None and epsg_6 is None:
+                # 只有3度带，唯一匹配
+                result['detected_epsg'] = epsg_3
+                result['confidence']    = 'high'
+            else:
+                # 6度带与3度带均存在（CM 为6的倍数），无法自动区分
+                result['note'] = (
+                    f'中央经线 {cm_int}° 同时匹配 6度带(EPSG:{epsg_6}) '
+                    f'和 3度带(EPSG:{epsg_3})，'
+                    f'请通过"指定坐标系"手动选择'
+                )
+            return result
+
+        # ── Lambert 及其他投影 ──────────────────────────────────────────────
+        if pt in (2, 3):
+            result['note'] = '文件元数据缺少标准纬线等参数，无法自动识别具体 EPSG，请手动指定'
+            return result
+
+        result['note'] = f'未知 proj_type={pt}，无法自动识别'
+        return result
+
+    def _apply_auto_detected_crs(self):
+        """调用检测逻辑，若置信度为 high 则将 CRS 升级为对应 EPSG 标准 CRS。
+
+        结果写入 self.crs_detection 供调用方（转换线程）读取日志。
+        """
+        detection = self._detect_wkid_from_metadata()
+        self.crs_detection = detection
+
+        if detection['detected_epsg'] and detection['confidence'] == 'high':
+            try:
+                self.crs = CRS.from_epsg(detection['detected_epsg'])
+            except Exception:
+                # EPSG 无效时不覆盖，保留原有 CRS
+                detection['note'] += ' (EPSG 加载失败，保留文件内置 CRS)'
 
     def _build_geodataframe(self):
         """构建 GeoDataFrame。"""
