@@ -802,10 +802,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                 lines.append(f"  …（另 {len(failed) - 10} 个未显示）")
             lines.append("")
 
-        # 若全部识别成功且只有一种 CRS，直接静默继续（不弹框）
-        if not ambiguous and not failed and len(epsg_groups) == 1:
-            return True
-
+        # 始终弹对话框，让用户确认
         # 弹对话框
         dlg = QDialog(self)
         dlg.setWindowTitle("转换前坐标系预检查")
