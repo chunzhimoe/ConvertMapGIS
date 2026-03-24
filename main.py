@@ -1017,7 +1017,10 @@ class CRSCalculatorWidget(SingleDirectionScrollArea):
         tgt_row.addWidget(self.tgt_combo)
         tgt_row.addSpacing(20)
         self.swap_btn = PushButton("交换源/目标坐标系")
-        self.swap_btn.setIcon(FIF.SYNC)
+        try:
+            self.swap_btn.setIcon(FIF.SYNC)
+        except AttributeError:
+            pass
         self.swap_btn.clicked.connect(self._swap_crs)
         tgt_row.addWidget(self.swap_btn)
         tgt_row.addStretch()
@@ -1026,7 +1029,10 @@ class CRSCalculatorWidget(SingleDirectionScrollArea):
         # 转换按钮 + 结果
         btn_row = QHBoxLayout()
         self.transform_btn = PushButton("执行转换")
-        self.transform_btn.setIcon(FIF.PLAY)
+        try:
+            self.transform_btn.setIcon(FIF.PLAY)
+        except AttributeError:
+            pass
         self.transform_btn.clicked.connect(self._do_transform)
         btn_row.addWidget(self.transform_btn)
         btn_row.addStretch()
@@ -1087,7 +1093,10 @@ class CRSCalculatorWidget(SingleDirectionScrollArea):
         # 查询按钮 + 结果
         btn_row = QHBoxLayout()
         self.epsg_btn = PushButton("查询 EPSG")
-        self.epsg_btn.setIcon(FIF.SEARCH)
+        try:
+            self.epsg_btn.setIcon(FIF.SEARCH)
+        except AttributeError:
+            pass
         self.epsg_btn.clicked.connect(self._do_epsg_lookup)
         btn_row.addWidget(self.epsg_btn)
         btn_row.addStretch()
@@ -1489,7 +1498,7 @@ class MainWindow(FluentWindow):
 
     def initNavigation(self):
         self.addSubInterface(self.homeInterface, FIF.HOME, '转换配置')
-        self.addSubInterface(self.crsCalculatorInterface, FIF.CALCULATOR, '坐标计算器')
+        self.addSubInterface(self.crsCalculatorInterface, QIcon(get_resource_path("resource/坐标系.png")), '坐标计算器')
         self.addSubInterface(self.logInterface, FIF.BOOK_SHELF, '日志输出')
         self.addSubInterface(self.aboutInterface, FIF.INFO, '软件介绍')
 
