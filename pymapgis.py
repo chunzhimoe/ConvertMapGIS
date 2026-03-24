@@ -419,17 +419,26 @@ class MapGisReader:
                 raise
 
     def _parse_crs(self):
-        """解析坐标系信息。"""
+        """解析坐标系信息。
+
+        MapGIS 内部坐标以毫米存储，投影坐标系（proj_type 2/3/5）需除以1000换算为米；
+        地理坐标系（proj_type 0）以度存储，无需换算。
+        换算统一在读取 proj_type 之后进行，与 wkid 是否指定无关，
+        避免原来将换算逻辑散落在各分支中导致 proj_type==5 漏除、
+        指定 wkid 时绕过换算等问题。
+        """
         self.file.seek(109)
         proj_type = ord(self.file.read(1))
         ellipsoid = ord(self.file.read(1))
         self.file.seek(143)
-        scale_key = 0
-        if self.coordinate_scale is not None:
-            self.file.read(8)
-            scale_key = 1
+
+        # 读取比例尺：优先使用调用方传入的 scale_factor，否则从文件读取
+        user_provided_scale = self.coordinate_scale is not None
+        if user_provided_scale:
+            self.file.read(8)  # 跳过文件中的比例尺字段
         else:
             self.coordinate_scale = struct.unpack('1d', self.file.read(8))[0]
+
         ellip_dict = {
             1: '+ellps=krass +towgs84=15.8,-154.4,-82.3,0,0,0,0 +units=m +no_d',
             2: '+a=6378140 +b=6356755.288157528',
@@ -441,37 +450,51 @@ class MapGisReader:
             116: '+ellps=clrk80 +towgs84=-166,-15,204,0,0,0,0',
             'cgcs2000': '+ellps=GRS80',
         }
-        if (ellipsoid not in ellip_dict) or (self.coordinate_scale == 0):
+
+        # 投影坐标系（高斯-克吕格等），坐标单位为毫米，需除以1000换算为米
+        # 地理坐标系（proj_type==0）以度存储，无需换算
+        # 此换算与 wkid 是否指定无关，只由源文件的 proj_type 决定
+        PROJECTED_TYPES = {2, 3, 5}
+        if proj_type in PROJECTED_TYPES:
+            if self.coordinate_scale == 0:
+                # 比例尺无效时兜底为1，防止后续除法产生 0.001
+                self.coordinate_scale = 1
+            else:
+                self.coordinate_scale = self.coordinate_scale / 1000
+
+        # 椭球体未知或比例尺原本为0（已被上面兜底为1）的异常情况
+        ellipsoid_unknown = ellipsoid not in ellip_dict
+        if ellipsoid_unknown:
             if ellipsoid == 0 and (self.wkid is None or str(self.wkid) == '0'):
                 # 椭球体类型为0且wkid为空，crs置空，主程序日志会有详细提示
                 self.crs = ''
                 return
-            if scale_key == 1:
-                self.coordinate_scale = self.coordinate_scale / 1000
-            else:
-                self.coordinate_scale = 1
+            # 椭球体未知但有 wkid，让 wkid 分支设置 CRS，此处只清空 crs
             self.crs = ''
-            
-        if proj_type == 5 and self.wkid is None:
-            self.file.seek(151)
-            cl = struct.unpack('1d', self.file.read(8))[0]
-            cl = int(str(cl).split('.')[0][:-4]) + int(str(cl).split('.')[0][-4:-2]) / 60.0 + int(str(cl).split('.')[0][-2:]) / 60.0 / 60
-            self.crs = CRS('+proj=tmerc' + f' +lat_0=0 +lon_0={cl} +k=1 +x_0=500000 +y_0=0 ' + ellip_dict[ellipsoid] + ' +units=m +no_defs')
-        elif proj_type == 0 and self.wkid is None:
-            self.crs = CRS('+proj=longlat ' + ellip_dict[ellipsoid] + ' +no_defs')
-        elif proj_type in (2, 3) and self.wkid is None:
-            self.coordinate_scale = self.coordinate_scale / 1000
-            self.file.seek(151)
-            cl = struct.unpack('1d', self.file.read(8))[0]
-            cl = int(str(cl).split('.')[0][:-4]) + int(str(cl).split('.')[0][-4:-2]) / 60.0 + int(str(cl).split('.')[0][-2:]) / 60.0 / 60
-            self.file.seek(175)
-            # 只有在没有指定wkid时才设置crs为None
-            if self.wkid is None:
+
+        # 仅在未指定 wkid 时，依据文件中的 proj_type 解析 CRS
+        if self.wkid is None and not ellipsoid_unknown:
+            if proj_type == 5:
+                # 高斯-克吕格投影
+                self.file.seek(151)
+                cl = struct.unpack('1d', self.file.read(8))[0]
+                cl = int(str(cl).split('.')[0][:-4]) + int(str(cl).split('.')[0][-4:-2]) / 60.0 + int(str(cl).split('.')[0][-2:]) / 60.0 / 60
+                self.crs = CRS('+proj=tmerc' + f' +lat_0=0 +lon_0={cl} +k=1 +x_0=500000 +y_0=0 ' + ellip_dict[ellipsoid] + ' +units=m +no_defs')
+            elif proj_type == 0:
+                # 地理坐标系
+                self.crs = CRS('+proj=longlat ' + ellip_dict[ellipsoid] + ' +no_defs')
+            elif proj_type in (2, 3):
+                # 其他投影（Lambert 等），解析中央经线，CRS 置空由调用方处理
+                self.file.seek(151)
+                cl = struct.unpack('1d', self.file.read(8))[0]
+                cl = int(str(cl).split('.')[0][:-4]) + int(str(cl).split('.')[0][-4:-2]) / 60.0 + int(str(cl).split('.')[0][-2:]) / 60.0 / 60
+                self.file.seek(175)
                 self.crs = None
+
+        # wkid 指定时直接写入 EPSG CRS，覆盖文件解析结果
         if self.wkid is not None:
             proj = CRS.from_epsg(self.wkid)
-            wkt = proj.to_wkt()
-            self.crs = CRS(wkt)
+            self.crs = CRS(proj.to_wkt())
 
     def _build_geodataframe(self):
         """构建 GeoDataFrame。"""
