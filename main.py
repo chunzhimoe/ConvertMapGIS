@@ -278,9 +278,9 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         finished_signal = pyqtSignal()
         progress_signal = pyqtSignal(int, int)  # 当前进度, 总数
 
-        def __init__(self, file_paths, output_dir, scale_text, projection_text, use_scale, use_proj, coord_systems, get_key_by_value_func, use_simple_naming, parent=None):
+        def __init__(self, file_paths, output_dir, scale_text, projection_text, use_scale, use_proj, coord_systems, get_key_by_value_func, use_simple_naming, input_dir=None, parent=None):
             super().__init__(parent)
-            self.file_paths = file_paths
+            self.file_paths = file_paths      # list of individual files (file mode), or list of MPJ paths (folder mode)
             self.output_dir = output_dir
             self.scale_text = scale_text
             self.projection_text = projection_text
@@ -289,30 +289,64 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             self.coord_systems = coord_systems
             self.get_key_by_value_func = get_key_by_value_func
             self.use_simple_naming = use_simple_naming
+            self.input_dir = input_dir        # 文件夹模式的输入根目录（None = 文件模式）
 
         def run(self):
-            """执行文件批量转换，支持比例尺和投影坐标系可选，支持MPJ工程文件展开"""
-            # 展开 MPJ 工程文件
-            expanded_files = []
-            for path in self.file_paths:
-                if path.lower().endswith('.mpj'):
+            """执行文件批量转换，支持比例尺和投影坐标系可选，支持MPJ工程文件展开，支持文件夹批量模式"""
+
+            # ── 构建待转换任务列表 ──────────────────────────────────────
+            # 每个任务 = {'mapgis_path': str, 'output_base_dir': str}
+            # 文件夹模式下先递归收集 mpj，再展开；文件模式保持原来逻辑
+            tasks = []  # list of {'mapgis_path': str, 'output_subdir': str}
+
+            if self.input_dir:
+                # 文件夹模式：递归扫描 mpj 文件
+                mpj_files = []
+                for root, dirs, files in os.walk(self.input_dir):
+                    for fname in files:
+                        if fname.lower().endswith('.mpj'):
+                            mpj_files.append(os.path.join(root, fname))
+                self.log_signal.emit(f"📁 文件夹模式：在 {self.input_dir} 中找到 {len(mpj_files)} 个MPJ工程文件")
+                for mpj_path in mpj_files:
                     try:
-                        proj = pymapgis.MapGISProjectReader(path)
+                        proj = pymapgis.MapGISProjectReader(mpj_path)
                         layers = proj.resolve_layer_paths()
                         self.log_signal.emit(
-                            f"📂 MPJ工程文件：{os.path.basename(path)} | "
+                            f"📂 MPJ工程文件：{os.path.relpath(mpj_path, self.input_dir)} | "
                             f"共 {proj.layer_count} 个图层，解析到 {len(layers)} 个有效路径"
                         )
                         for layer in layers:
-                            expanded_files.append(layer['path'])
+                            layer_path = layer['path']
+                            # 计算输出子目录（保留目录结构）
+                            out_subdir = self._compute_output_subdir(layer_path, self.input_dir)
+                            tasks.append({'mapgis_path': layer_path, 'output_subdir': out_subdir})
                     except Exception as e:
-                        self.log_signal.emit(f"❌ MPJ解析失败 | {os.path.basename(path)} | {e}")
-                else:
-                    expanded_files.append(path)
+                        self.log_signal.emit(f"❌ MPJ解析失败 | {os.path.basename(mpj_path)} | {e}")
+            else:
+                # 文件模式：展开 MPJ 工程文件，其余文件直接添加
+                for path in self.file_paths:
+                    if path.lower().endswith('.mpj'):
+                        try:
+                            proj = pymapgis.MapGISProjectReader(path)
+                            layers = proj.resolve_layer_paths()
+                            self.log_signal.emit(
+                                f"📂 MPJ工程文件：{os.path.basename(path)} | "
+                                f"共 {proj.layer_count} 个图层，解析到 {len(layers)} 个有效路径"
+                            )
+                            for layer in layers:
+                                tasks.append({'mapgis_path': layer['path'], 'output_subdir': ''})
+                        except Exception as e:
+                            self.log_signal.emit(f"❌ MPJ解析失败 | {os.path.basename(path)} | {e}")
+                    else:
+                        tasks.append({'mapgis_path': path, 'output_subdir': ''})
 
-            total = len(expanded_files)
+            total = len(tasks)
             current = 0
-            for mapgis_file in expanded_files:
+            for task in tasks:
+                mapgis_file = task['mapgis_path']
+                output_subdir = task['output_subdir']
+                # 最终输出目录（文件夹模式带子目录，文件模式直接在 output_dir）
+                out_dir = os.path.join(self.output_dir, output_subdir) if output_subdir else self.output_dir
                 try:
                     start_time = time.time()
                     kwargs = {}
@@ -362,13 +396,17 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                         self.log_signal.emit(
                             f"🕐 {time.strftime('%H:%M:%S')} | ✅ 转换成功 | 文件：{os.path.basename(mapgis_file)}"
                         )
-                    
+
+                    # 确保输出子目录存在（文件夹模式）
+                    if out_dir != self.output_dir:
+                        os.makedirs(out_dir, exist_ok=True)
+
                     # 根据命名方式选择生成文件名
                     if self.use_simple_naming:
-                        new_file_path = os.path.join(self.output_dir, f"{file_base}.shp")
+                        new_file_path = os.path.join(out_dir, f"{file_base}.shp")
                     else:
-                        new_file_path = os.path.join(self.output_dir, f"{file_base}_{file_ext}.shp")
-                    
+                        new_file_path = os.path.join(out_dir, f"{file_base}_{file_ext}.shp")
+
                     # 命名冲突处理：若文件已存在则追加后缀 _1, _2, ...
                     if os.path.exists(new_file_path):
                         base_no_ext = os.path.splitext(new_file_path)[0]
@@ -380,21 +418,21 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                             f"⚠️ 命名冲突 | {os.path.basename(new_file_path)} 已存在，改名为 {os.path.basename(renamed_path)}"
                         )
                         new_file_path = renamed_path
-                    
+
                     # 保存文件
                     reader.to_file(new_file_path)
-                    
+
                     end_time = time.time()
                     elapsed_time = end_time - start_time
                     self.log_signal.emit(
                         f"🕐 {time.strftime('%H:%M:%S')} | ✅ 转换完成 | 文件：{os.path.basename(mapgis_file)} | 耗时：{elapsed_time:.2f}秒"
                     )
-                    
+
                 except Exception as e:
                     import traceback
                     err_type = type(e).__name__
                     err_detail = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-                    
+
                     # 针对KeyError 0特殊提示
                     if isinstance(e, KeyError) and e.args and e.args[0] == 0:
                         self.log_signal.emit(
@@ -409,10 +447,28 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             self.log_signal.emit('🎉 全部转换完成！')
             self.finished_signal.emit()
 
+        def _compute_output_subdir(self, layer_path, input_root):
+            """计算图层相对于输入根目录的子目录路径，用于保留目录结构输出。
+            若 layer_path 在 input_root 外，返回 '_external/<relative_or_basename>'"""
+            try:
+                # 取图层所在目录
+                layer_dir = os.path.dirname(os.path.abspath(layer_path))
+                input_root_abs = os.path.abspath(input_root)
+                rel = os.path.relpath(layer_dir, input_root_abs)
+                # os.path.relpath 在 Windows 跨盘符时会含有 '..'
+                if rel.startswith('..'):
+                    # 图层在 input_root 外，fallback 到 _external
+                    return os.path.join('_external', os.path.basename(layer_dir))
+                return rel
+            except ValueError:
+                # Windows 跨盘符 relpath 会 raise ValueError
+                return os.path.join('_external', os.path.basename(os.path.dirname(layer_path)))
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.output_dir = None
         self.selected_files = None
+        self.selected_input_dir = None  # 批量文件夹模式：输入根目录
         self.state_tooltip = None
         self.setTitle("转换配置")
         self.setBorderRadius(8)
@@ -420,9 +476,21 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         # 选择文件按钮
         self.file_button = PushButton(text="选择文件")
         self.file_button.clicked.connect(self.choose_files)
+        # 选择工程文件夹按钮（批量文件夹模式）
+        self.input_dir_button = PushButton(text="选择工程文件夹")
+        self.input_dir_button.clicked.connect(self.choose_input_folder)
         # 选择输出文件夹按钮
         self.folder_button = PushButton("选择输出文件夹")
         self.folder_button.clicked.connect(self.choose_output_folder)
+
+        # 文件选择按钮横向布局
+        self.file_select_widget = QWidget()
+        self.file_select_layout = QHBoxLayout(self.file_select_widget)
+        self.file_select_layout.setContentsMargins(0, 0, 0, 0)
+        self.file_select_layout.setSpacing(10)
+        self.file_select_layout.addWidget(self.file_button)
+        self.file_select_layout.addWidget(self.input_dir_button)
+        self.file_select_layout.addStretch()
 
         # 比例尺输入框
         self.scale_box = EditableComboBox()
@@ -443,6 +511,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.scale_layout.addWidget(self.scale_box)
 
         self.file_button.setFixedWidth(120)
+        self.input_dir_button.setFixedWidth(130)
 
         # 指定投影坐标系复选框
         self.proj_checkbox = CheckBox('指定坐标系', self)
@@ -489,23 +558,53 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.convert_layout.addStretch()
 
         # 卡片分组（资源路径替换）
-        self.file_group = self.addGroup(get_resource_path("resource/文件.svg"), "选择Mapgis文件", "选择需要转换的Mapgis文件", self.file_button)
+        self.file_group = self.addGroup(get_resource_path("resource/文件.svg"), "选择Mapgis文件", "选择文件或工程文件夹（批量）", self.file_select_widget)
         self.folder_group = self.addGroup(get_resource_path("resource/文件夹.svg"), "选择输出文件夹", "选择转换后的文件输出路径", self.folder_button)
         self.addGroup(get_resource_path("resource/比例尺.png"), "指定比例尺 ", "设置指定转换的比例尺", self.scale_widget)
         self.addGroup(get_resource_path("resource/坐标系.png"), "指定转换坐标系", "指定转换后的坐标系", self.projection_widget)
         self.convert_group = self.addGroup(get_resource_path("resource/开始.png"), "执行mapgis文件转换", "转换进度", self.convert_widget)
 
     def choose_files(self):
-        """选择Mapgis文件"""
+        """选择Mapgis文件（单文件模式，清除文件夹模式）"""
         options = QFileDialog.Options()
         self.selected_files, _ = QFileDialog.getOpenFileNames(self, "选择文件", "", "Mapgis文件 (*.wt *.wp *.wl *.mpj *.MPJ);", options=options)
         if self.selected_files:
+            # 切换到文件模式，清除文件夹模式
+            self.selected_input_dir = None
             mpj_count = sum(1 for f in self.selected_files if f.lower().endswith('.mpj'))
             layer_count = len(self.selected_files) - mpj_count
             if mpj_count:
                 self.file_group.setContent(f"已选择{layer_count}个图层文件 + {mpj_count}个MPJ工程文件")
             else:
                 self.file_group.setContent(f"已选择{len(self.selected_files)}个mapgis文件")
+
+    def choose_input_folder(self):
+        """选择工程文件夹（批量文件夹模式），递归扫描 *.mpj 文件"""
+        options = QFileDialog.Options()
+        folder = QFileDialog.getExistingDirectory(self, "选择工程文件夹", "", options=options)
+        if not folder:
+            return
+        # 递归查找所有 .mpj 文件
+        mpj_files = []
+        for root, dirs, files in os.walk(folder):
+            for fname in files:
+                if fname.lower().endswith('.mpj'):
+                    mpj_files.append(os.path.join(root, fname))
+        if not mpj_files:
+            InfoBar.warning(
+                title='未找到工程文件',
+                content=f"所选文件夹中未找到任何 MPJ 工程文件",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=2000,
+                parent=self
+            )
+            return
+        # 切换到文件夹模式，清除单文件选择
+        self.selected_input_dir = folder
+        self.selected_files = None
+        self.file_group.setContent(f"批量模式：找到 {len(mpj_files)} 个 MPJ 工程文件（{os.path.basename(folder)}）")
 
     def choose_output_folder(self):
         """选择输出文件夹"""
@@ -529,10 +628,11 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
 
     def start_conversion(self):
         """开始批量转换文件"""
-        if not self.selected_files:
+        # 校验：必须选择文件或工程文件夹之一
+        if not self.selected_files and not self.selected_input_dir:
             InfoBar.error(
                 title='错误',
-                content="未选择需要转换的文件",
+                content="未选择需要转换的文件或工程文件夹",
                 orient=Qt.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP_RIGHT,
@@ -551,22 +651,37 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                 parent=self
             )
             return
-        
+
         # 输出转换配置信息到日志窗口
         self.log_conversion_config()
-        
+
         # 获取当前时间作为日志文件名
         current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_filename = f"转换日志_{current_time}.txt"
-        
-        self.state_tooltip = StateToolTip('正在转换文件', f'已转换 0/{len(self.selected_files)} 个文件', self)
+
+        # StateToolTip 初始文本（文件夹模式下无法预知总数，先用占位符）
+        if self.selected_input_dir:
+            tooltip_init = '正在扫描工程文件夹...'
+        else:
+            tooltip_init = f'已转换 0/{len(self.selected_files)} 个文件'
+        self.state_tooltip = StateToolTip('正在转换文件', tooltip_init, self)
         self.state_tooltip.move(600, 0)
         self.state_tooltip.setEnabled(False)
         self.state_tooltip.show()
         self.convert_button.setEnabled(False)
+
         # 启动转换线程
+        # 文件夹模式：file_paths 传空列表，input_dir 传根目录
+        # 文件模式：file_paths 传选中文件，input_dir 传 None
+        if self.selected_input_dir:
+            file_paths_arg = []
+            input_dir_arg = self.selected_input_dir
+        else:
+            file_paths_arg = self.selected_files
+            input_dir_arg = None
+
         self.convert_thread = self.ConvertThread(
-            self.selected_files,
+            file_paths_arg,
             self.output_dir,
             self.scale_box.text(),
             self.projection_combo.text(),
@@ -574,7 +689,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             self.proj_checkbox.isChecked(),
             self.common_coord_systems,
             self.get_key_by_value,
-            self.naming_checkbox.isChecked()
+            self.naming_checkbox.isChecked(),
+            input_dir=input_dir_arg
         )
         self.convert_thread.log_signal.connect(self.handle_log)
         self.convert_thread.finished_signal.connect(self.handle_convert_finished)
@@ -588,11 +704,17 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             "📋 转换配置信息",
             "=" * 60,
             f"📁 输出目录: {self.output_dir}",
-            f"📄 待转换文件数: {len(self.selected_files)}",
-            "📄 待转换文件列表:"
         ]
-        for i, file_path in enumerate(self.selected_files, 1):
-            config_lines.append(f"   {i}. {os.path.basename(file_path)}")
+        if self.selected_input_dir:
+            # 文件夹模式
+            config_lines.append(f"📂 工程文件夹（批量模式）: {self.selected_input_dir}")
+            config_lines.append("   (MPJ文件数量将在扫描后显示，输出保留目录结构)")
+        else:
+            # 文件模式
+            config_lines.append(f"📄 待转换文件数: {len(self.selected_files)}")
+            config_lines.append("📄 待转换文件列表:")
+            for i, file_path in enumerate(self.selected_files, 1):
+                config_lines.append(f"   {i}. {os.path.basename(file_path)}")
         config_lines.extend([
             f"🔧 比例尺设置: {'启用' if self.scale_checkbox.isChecked() else '禁用'}",
             f"🌍 投影坐标系设置: {'启用' if self.proj_checkbox.isChecked() else '禁用'}",
@@ -672,7 +794,10 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                         f.write(f"MapGIS文件转换日志\n")
                         f.write(f"转换时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                         f.write(f"输出目录: {self.output_dir}\n")
-                        f.write(f"转换文件数: {len(self.selected_files)}\n")
+                        if self.selected_input_dir:
+                            f.write(f"工程文件夹: {self.selected_input_dir}\n")
+                        else:
+                            f.write(f"转换文件数: {len(self.selected_files) if self.selected_files else 0}\n")
                         f.write("-" * 50 + "\n")
                         f.write(log_content)
                     # 使用handle_log方法确保日志格式一致
