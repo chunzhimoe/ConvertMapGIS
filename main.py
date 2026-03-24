@@ -9,19 +9,243 @@ import warnings  # 新增
 from PyQt5.QtCore import Qt, QUrl, QThread, pyqtSignal, QCoreApplication
 from PyQt5.QtGui import QDesktopServices, QIcon, QIntValidator
 from PyQt5.QtWidgets import (
-    QFrame, QApplication, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, QTextEdit
+    QFrame, QApplication, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, QTextEdit,
+    QLineEdit, QButtonGroup, QRadioButton, QDoubleValidator
 )
 from qfluentwidgets import (
     FluentWindow, SubtitleLabel, FluentIcon as FIF, BodyLabel, PushButton, CheckBox, InfoBar, InfoBarPosition,
     HeaderCardWidget,
     setFont, SingleDirectionScrollArea, StateToolTip, GroupHeaderCardWidget,
-    ComboBox, EditableComboBox
+    ComboBox, EditableComboBox, LineEdit
 )
 
 import pymapgis
 
 # ========== 新增：版本号 ==========
-VERSION = "v1.0.1"
+VERSION = "v1.0.4"
+
+# ========== 常用坐标系字典（模块级，供转换配置和坐标计算器共享） ==========
+COMMON_COORD_SYSTEMS = {
+    '4214': 'GCS_Beijing_1954', '4326': 'GCS_WGS_1984',
+    '4490': 'GCS_China_Geodetic_Coordinate_System_2000',
+    '4555': 'GCS_New_Beijing', '4610': 'GCS_Xian_1980',
+    '2327': 'Xian_1980_GK_Zone_13',
+    '2328': 'Xian_1980_GK_Zone_14', '2329': 'Xian_1980_GK_Zone_15',
+    '2330': 'Xian_1980_GK_Zone_16',
+    '2331': 'Xian_1980_GK_Zone_17', '2332': 'Xian_1980_GK_Zone_18',
+    '2333': 'Xian_1980_GK_Zone_19',
+    '2334': 'Xian_1980_GK_Zone_20', '2335': 'Xian_1980_GK_Zone_21',
+    '2336': 'Xian_1980_GK_Zone_22',
+    '2337': 'Xian_1980_GK_Zone_23', '2338': 'Xian_1980_GK_CM_75E',
+    '2339': 'Xian_1980_GK_CM_81E',
+    '2340': 'Xian_1980_GK_CM_87E', '2341': 'Xian_1980_GK_CM_93E',
+    '2342': 'Xian_1980_GK_CM_99E',
+    '2343': 'Xian_1980_GK_CM_105E', '2344': 'Xian_1980_GK_CM_111E',
+    '2345': 'Xian_1980_GK_CM_117E',
+    '2346': 'Xian_1980_GK_CM_123E', '2347': 'Xian_1980_GK_CM_129E',
+    '2348': 'Xian_1980_GK_CM_135E',
+    '2349': 'Xian_1980_3_Degree_GK_Zone_25',
+    '2350': 'Xian_1980_3_Degree_GK_Zone_26',
+    '2351': 'Xian_1980_3_Degree_GK_Zone_27',
+    '2352': 'Xian_1980_3_Degree_GK_Zone_28',
+    '2353': 'Xian_1980_3_Degree_GK_Zone_29',
+    '2354': 'Xian_1980_3_Degree_GK_Zone_30',
+    '2355': 'Xian_1980_3_Degree_GK_Zone_31',
+    '2356': 'Xian_1980_3_Degree_GK_Zone_32',
+    '2357': 'Xian_1980_3_Degree_GK_Zone_33',
+    '2358': 'Xian_1980_3_Degree_GK_Zone_34',
+    '2359': 'Xian_1980_3_Degree_GK_Zone_35',
+    '2360': 'Xian_1980_3_Degree_GK_Zone_36',
+    '2361': 'Xian_1980_3_Degree_GK_Zone_37',
+    '2362': 'Xian_1980_3_Degree_GK_Zone_38',
+    '2363': 'Xian_1980_3_Degree_GK_Zone_39',
+    '2364': 'Xian_1980_3_Degree_GK_Zone_40',
+    '2365': 'Xian_1980_3_Degree_GK_Zone_41',
+    '2366': 'Xian_1980_3_Degree_GK_Zone_42',
+    '2367': 'Xian_1980_3_Degree_GK_Zone_43',
+    '2368': 'Xian_1980_3_Degree_GK_Zone_44',
+    '2369': 'Xian_1980_3_Degree_GK_Zone_45',
+    '2370': 'Xian_1980_3_Degree_GK_CM_75E',
+    '2371': 'Xian_1980_3_Degree_GK_CM_78E',
+    '2372': 'Xian_1980_3_Degree_GK_CM_81E',
+    '2373': 'Xian_1980_3_Degree_GK_CM_84E',
+    '2374': 'Xian_1980_3_Degree_GK_CM_87E',
+    '2375': 'Xian_1980_3_Degree_GK_CM_90E',
+    '2376': 'Xian_1980_3_Degree_GK_CM_93E',
+    '2377': ' Xian_1980_3_Degree_GK_CM_96E',
+    '2378': 'Xian_1980_3_Degree_GK_CM_99E',
+    '2379': 'Xian_1980_3_Degree_GK_CM_102E',
+    '2380': 'Xian_1980_3_Degree_GK_CM_105E',
+    '2381': 'Xian_1980_3_Degree_GK_CM_108E',
+    '2382': 'Xian_1980_3_Degree_GK_CM_111E',
+    '2383': 'Xian_1980_3_Degree_GK_CM_114E',
+    '2384': 'Xian_1980_3_Degree_GK_CM_117E',
+    '2385': 'Xian_1980_3_Degree_GK_CM_120E',
+    '2386': 'Xian_1980_3_Degree_GK_CM_123E',
+    '2387': 'Xian_1980_3_Degree_GK_CM_126E',
+    '2388': 'Xian_1980_3_Degree_GK_CM_129E',
+    '2389': 'Xian_1980_3_Degree_GK_CM_132E',
+    '2390': 'Xian_1980_3_Degree_GK_CM_135E',
+    '2401': 'Beijing_1954_3_Degree_GK_Zone_25',
+    '2402': 'Beijing_1954_3_Degree_GK_Zone_26',
+    '2403': 'Beijing_1954_3_Degree_GK_Zone_27',
+    '2404': 'Beijing_1954_3_Degree_GK_Zone_28',
+    '2405': 'Beijing_1954_3_Degree_GK_Zone_29',
+    '2406': 'Beijing_1954_3_Degree_GK_Zone_30',
+    '2407': 'Beijing_1954_3_Degree_GK_Zone_31',
+    '2408': 'Beijing_1954_3_Degree_GK_Zone_32',
+    '2409': 'Beijing_1954_3_Degree_GK_Zone_33',
+    '2410': 'Beijing_1954_3_Degree_GK_Zone_34',
+    '2411': 'Beijing_1954_3_Degree_GK_Zone_35',
+    '2412': 'Beijing_1954_3_Degree_GK_Zone_36',
+    '2413': 'Beijing_1954_3_Degree_GK_Zone_37',
+    '2414': 'Beijing_1954_3_Degree_GK_Zone_38',
+    '2415': 'Beijing_1954_3_Degree_GK_Zone_39',
+    '2416': 'Beijing_1954_3_Degree_GK_Zone_40',
+    '2417': 'Beijing_1954_3_Degree_GK_Zone_41',
+    '2418': 'Beijing_1954_3_Degree_GK_Zone_42',
+    '2419': 'Beijing_1954_3_Degree_GK_Zone_43',
+    '2420': 'Beijing_1954_3_Degree_GK_Zone_44',
+    '2421': 'Beijing_1954_3_Degree_GK_Zone_45',
+    '2422': 'Beijing_1954_3_Degree_GK_CM_75E',
+    '2423': 'Beijing_1954_3_Degree_GK_CM_78E',
+    '2424': 'Beijing_1954_3_Degree_GK_CM_81E',
+    '2425': 'Beijing_1954_3_Degree_GK_CM_84E',
+    '2426': 'Beijing_1954_3_Degree_GK_CM_87E',
+    '2427': 'Beijing_1954_3_Degree_GK_CM_90E',
+    '2428': 'Beijing_1954_3_Degree_GK_CM_93E',
+    '2429': 'Beijing_1954_3_Degree_GK_CM_96E',
+    '2430': 'Beijing_1954_3_Degree_GK_CM_99E',
+    '2431': 'Beijing_1954_3_Degree_GK_CM_102E',
+    '2432': 'Beijing_1954_3_Degree_GK_CM_105E',
+    '2433': 'Beijing_1954_3_Degree_GK_CM_108E',
+    '2434': 'Beijing_1954_3_Degree_GK_CM_111E',
+    '2435': 'Beijing_1954_3_Degree_GK_CM_114E',
+    '2436': 'Beijing_1954_3_Degree_GK_CM_117E',
+    '2437': 'Beijing_1954_3_Degree_GK_CM_120E',
+    '2438': 'Beijing_1954_3_Degree_GK_CM_123E',
+    '2439': 'Beijing_1954_3_Degree_GK_CM_126E',
+    '2440': 'Beijing_1954_3_Degree_GK_CM_129E',
+    '2441': 'Beijing_1954_3_Degree_GK_CM_132E',
+    '2442': 'Beijing_1954_3_Degree_GK_CM_135E',
+    '3395': 'WGS_1984_World_Mercator',
+    '4491': 'CGCS2000_GK_Zone_13',
+    '4492': 'CGCS2000_GK_Zone_14', '4493': 'CGCS2000_GK_Zone_15',
+    '4494': 'CGCS2000_GK_Zone_16',
+    '4495': 'CGCS2000_GK_Zone_17', '4496': 'CGCS2000_GK_Zone_18',
+    '4497': 'CGCS2000_GK_Zone_19',
+    '4498': 'CGCS2000_GK_Zone_20', '4499': 'CGCS2000_GK_Zone_21',
+    '4500': 'CGCS2000_GK_Zone_22',
+    '4501': 'CGCS2000_GK_Zone_23', '4502': 'CGCS2000_GK_CM_75E',
+    '4503': 'CGCS2000_GK_CM_81E',
+    '4504': 'CGCS2000_GK_CM_87E', '4505': 'CGCS2000_GK_CM_93E',
+    '4506': 'CGCS2000_GK_CM_99E',
+    '4507': 'CGCS2000_GK_CM_105E', '4508': 'CGCS2000_GK_CM_111E',
+    '4509': 'CGCS2000_GK_CM_117E',
+    '4510': 'CGCS2000_GK_CM_123E', '4511': 'CGCS2000_GK_CM_129E',
+    '4512': 'CGCS2000_GK_CM_135E',
+    '4513': 'CGCS2000_3_Degree_GK_Zone_25',
+    '4514': 'CGCS2000_3_Degree_GK_Zone_26',
+    '4515': 'CGCS2000_3_Degree_GK_Zone_27',
+    '4516': 'CGCS2000_3_Degree_GK_Zone_28',
+    '4517': 'CGCS2000_3_Degree_GK_Zone_29',
+    '4518': 'CGCS2000_3_Degree_GK_Zone_30',
+    '4519': 'CGCS2000_3_Degree_GK_Zone_31',
+    '4520': 'CGCS2000_3_Degree_GK_Zone_32',
+    '4521': 'CGCS2000_3_Degree_GK_Zone_33',
+    '4522': 'CGCS2000_3_Degree_GK_Zone_34',
+    '4523': 'CGCS2000_3_Degree_GK_Zone_35',
+    '4524': 'CGCS2000_3_Degree_GK_Zone_36',
+    '4525': 'CGCS2000_3_Degree_GK_Zone_37',
+    '4526': 'CGCS2000_3_Degree_GK_Zone_38',
+    '4527': 'CGCS2000_3_Degree_GK_Zone_39',
+    '4528': 'CGCS2000_3_Degree_GK_Zone_40',
+    '4529': 'CGCS2000_3_Degree_GK_Zone_41',
+    '4530': 'CGCS2000_3_Degree_GK_Zone_42',
+    '4531': 'CGCS2000_3_Degree_GK_Zone_43',
+    '4532': 'CGCS2000_3_Degree_GK_Zone_44',
+    '4533': 'CGCS2000_3_Degree_GK_Zone_45',
+    '4534': 'CGCS2000_3_Degree_GK_CM_75E',
+    '4535': 'CGCS2000_3_Degree_GK_CM_78E', '4536': 'CGCS2000_3_Degree_GK_CM_81E',
+    '4537': 'CGCS2000_3_Degree_GK_CM_84E', '4538': 'CGCS2000_3_Degree_GK_CM_87E',
+    '4539': 'CGCS2000_3_Degree_GK_CM_90E', '4540': 'CGCS2000_3_Degree_GK_CM_93E',
+    '4541': 'CGCS2000_3_Degree_GK_CM_96E', '4542': 'CGCS2000_3_Degree_GK_CM_99E',
+    '4543': 'CGCS2000_3_Degree_GK_CM_102E',
+    '4544': 'CGCS2000_3_Degree_GK_CM_105E',
+    '4545': 'CGCS2000_3_Degree_GK_CM_108E',
+    '4546': 'CGCS2000_3_Degree_GK_CM_111E',
+    '4547': 'CGCS2000_3_Degree_GK_CM_114E',
+    '4548': 'CGCS2000_3_Degree_GK_CM_117E',
+    '4549': 'CGCS2000_3_Degree_GK_CM_120E',
+    '4550': 'CGCS2000_3_Degree_GK_CM_123E',
+    '4551': 'CGCS2000_3_Degree_GK_CM_126E',
+    '4552': 'CGCS2000_3_Degree_GK_CM_129E',
+    '4553': 'CGCS2000_3_Degree_GK_CM_132E',
+    '4554': 'CGCS2000_3_Degree_GK_CM_135E',
+    '4568': 'New_Beijing_Gauss_Kruger_Zone_13',
+    '4569': 'New_Beijing_Gauss_Kruger_Zone_14',
+    '4570': 'New_Beijing_Gauss_Kruger_Zone_15',
+    '4571': 'New_Beijing_Gauss_Kruger_Zone_16',
+    '4572': 'New_Beijing_Gauss_Kruger_Zone_17',
+    '4573': 'New_Beijing_Gauss_Kruger_Zone_18',
+    '4574': 'New_Beijing_Gauss_Kruger_Zone_19',
+    '4575': 'New_Beijing_Gauss_Kruger_Zone_20',
+    '4576': 'New_Beijing_Gauss_Kruger_Zone_21',
+    '4577': 'New_Beijing_Gauss_Kruger_Zone_22',
+    '4578': 'New_Beijing_Gauss_Kruger_Zone_23',
+    '4579': 'New_Beijing_Gauss_Kruger_CM_75E',
+    '4580': 'New_Beijing_Gauss_Kruger_CM_81E',
+    '4581': 'New_Beijing_Gauss_Kruger_CM_87E',
+    '4582': 'New_Beijing_Gauss_Kruger_CM_93E',
+    '4583': 'New_Beijing_Gauss_Kruger_CM_99E',
+    '4584': 'New_Beijing_Gauss_Kruger_CM_105E',
+    '4585': 'New_Beijing_Gauss_Kruger_CM_111E',
+    '4586': 'New_Beijing_Gauss_Kruger_CM_117E',
+    '4587': 'New_Beijing_Gauss_Kruger_CM_123E',
+    '4588': 'New_Beijing_Gauss_Kruger_CM_129E',
+    '4589': 'New_Beijing_Gauss_Kruger_CM_135E',
+    '4652': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_25',
+    '4653': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_26',
+    '4654': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_27',
+    '4655': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_28',
+    '4656': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_29',
+    '4766': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_30',
+    '4767': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_31',
+    '4768': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_32',
+    '4769': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_33',
+    '4770': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_34',
+    '4771': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_35',
+    '4772': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_36',
+    '4773': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_37',
+    '4774': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_38',
+    '4775': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_39',
+    '4776': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_40',
+    '4777': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_41',
+    '4778': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_42',
+    '4779': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_43',
+    '4780': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_44',
+    '4781': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_45',
+    '4782': 'New_Beijing_3_Degree_Gauss_Kruger_CM_75E',
+    '4783': 'New_Beijing_3_Degree_Gauss_Kruger_CM_78E',
+    '4784': 'New_Beijing_3_Degree_Gauss_Kruger_CM_81E',
+    '4785': 'New_Beijing_3_Degree_Gauss_Kruger_CM_84E',
+    '4786': 'New_Beijing_3_Degree_Gauss_Kruger_CM_87E',
+    '4787': 'New_Beijing_3_Degree_Gauss_Kruger_CM_90E',
+    '4788': 'New_Beijing_3_Degree_Gauss_Kruger_CM_93E',
+    '4789': 'New_Beijing_3_Degree_Gauss_Kruger_CM_96E',
+    '4790': 'New_Beijing_3_Degree_Gauss_Kruger_CM_99E',
+    '4791': 'New_Beijing_3_Degree_Gauss_Kruger_CM_102E',
+    '4792': 'New_Beijing_3_Degree_Gauss_Kruger_CM_105E',
+    '4793': 'New_Beijing_3_Degree_Gauss_Kruger_CM_108E',
+    '4794': 'New_Beijing_3_Degree_Gauss_Kruger_CM_111E',
+    '4795': 'New_Beijing_3_Degree_Gauss_Kruger_CM_114E',
+    '4796': 'New_Beijing_3_Degree_Gauss_Kruger_CM_117E',
+    '4797': 'New_Beijing_3_Degree_Gauss_Kruger_CM_120E',
+    '4798': 'New_Beijing_3_Degree_Gauss_Kruger_CM_123E',
+    '4799': 'New_Beijing_3_Degree_Gauss_Kruger_CM_126E',
+    '4800': 'New_Beijing_3_Degree_Gauss_Kruger_CM_129E',
+    '4822': 'New_Beijing_3_Degree_Gauss_Kruger_CM_135E',
+}
 
 # ========== 新增：资源路径工具函数 ==========
 def get_resource_path(relative_path):
@@ -67,10 +291,28 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             self.use_simple_naming = use_simple_naming
 
         def run(self):
-            """执行文件批量转换，支持比例尺和投影坐标系可选"""
-            total = len(self.file_paths)
+            """执行文件批量转换，支持比例尺和投影坐标系可选，支持MPJ工程文件展开"""
+            # 展开 MPJ 工程文件
+            expanded_files = []
+            for path in self.file_paths:
+                if path.lower().endswith('.mpj'):
+                    try:
+                        proj = pymapgis.MapGISProjectReader(path)
+                        layers = proj.resolve_layer_paths()
+                        self.log_signal.emit(
+                            f"📂 MPJ工程文件：{os.path.basename(path)} | "
+                            f"共 {proj.layer_count} 个图层，解析到 {len(layers)} 个有效路径"
+                        )
+                        for layer in layers:
+                            expanded_files.append(layer['path'])
+                    except Exception as e:
+                        self.log_signal.emit(f"❌ MPJ解析失败 | {os.path.basename(path)} | {e}")
+                else:
+                    expanded_files.append(path)
+
+            total = len(expanded_files)
             current = 0
-            for mapgis_file in self.file_paths:
+            for mapgis_file in expanded_files:
                 try:
                     start_time = time.time()
                     kwargs = {}
@@ -126,6 +368,18 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                         new_file_path = os.path.join(self.output_dir, f"{file_base}.shp")
                     else:
                         new_file_path = os.path.join(self.output_dir, f"{file_base}_{file_ext}.shp")
+                    
+                    # 命名冲突处理：若文件已存在则追加后缀 _1, _2, ...
+                    if os.path.exists(new_file_path):
+                        base_no_ext = os.path.splitext(new_file_path)[0]
+                        suffix = 1
+                        while os.path.exists(f"{base_no_ext}_{suffix}.shp"):
+                            suffix += 1
+                        renamed_path = f"{base_no_ext}_{suffix}.shp"
+                        self.log_signal.emit(
+                            f"⚠️ 命名冲突 | {os.path.basename(new_file_path)} 已存在，改名为 {os.path.basename(renamed_path)}"
+                        )
+                        new_file_path = renamed_path
                     
                     # 保存文件
                     reader.to_file(new_file_path)
@@ -195,224 +449,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.proj_checkbox.clicked.connect(self.toggle_projection_box)
         self.projection_combo = ComboBox()
 
-        # 常用坐标系字典
-        self.common_coord_systems = {'4214': 'GCS_Beijing_1954', '4326': 'GCS_WGS_1984',
-                                          '4490': 'GCS_China_Geodetic_Coordinate_System_2000',
-                                          '4555': 'GCS_New_Beijing', '4610': 'GCS_Xian_1980',
-                                          '2327': 'Xian_1980_GK_Zone_13',
-                                          '2328': 'Xian_1980_GK_Zone_14', '2329': 'Xian_1980_GK_Zone_15',
-                                          '2330': 'Xian_1980_GK_Zone_16',
-                                          '2331': 'Xian_1980_GK_Zone_17', '2332': 'Xian_1980_GK_Zone_18',
-                                          '2333': 'Xian_1980_GK_Zone_19',
-                                          '2334': 'Xian_1980_GK_Zone_20', '2335': 'Xian_1980_GK_Zone_21',
-                                          '2336': 'Xian_1980_GK_Zone_22',
-                                          '2337': 'Xian_1980_GK_Zone_23', '2338': 'Xian_1980_GK_CM_75E',
-                                          '2339': 'Xian_1980_GK_CM_81E',
-                                          '2340': 'Xian_1980_GK_CM_87E', '2341': 'Xian_1980_GK_CM_93E',
-                                          '2342': 'Xian_1980_GK_CM_99E',
-                                          '2343': 'Xian_1980_GK_CM_105E', '2344': 'Xian_1980_GK_CM_111E',
-                                          '2345': 'Xian_1980_GK_CM_117E',
-                                          '2346': 'Xian_1980_GK_CM_123E', '2347': 'Xian_1980_GK_CM_129E',
-                                          '2348': 'Xian_1980_GK_CM_135E',
-                                          '2349': 'Xian_1980_3_Degree_GK_Zone_25',
-                                          '2350': 'Xian_1980_3_Degree_GK_Zone_26',
-                                          '2351': 'Xian_1980_3_Degree_GK_Zone_27',
-                                          '2352': 'Xian_1980_3_Degree_GK_Zone_28',
-                                          '2353': 'Xian_1980_3_Degree_GK_Zone_29',
-                                          '2354': 'Xian_1980_3_Degree_GK_Zone_30',
-                                          '2355': 'Xian_1980_3_Degree_GK_Zone_31',
-                                          '2356': 'Xian_1980_3_Degree_GK_Zone_32',
-                                          '2357': 'Xian_1980_3_Degree_GK_Zone_33',
-                                          '2358': 'Xian_1980_3_Degree_GK_Zone_34',
-                                          '2359': 'Xian_1980_3_Degree_GK_Zone_35',
-                                          '2360': 'Xian_1980_3_Degree_GK_Zone_36',
-                                          '2361': 'Xian_1980_3_Degree_GK_Zone_37',
-                                          '2362': 'Xian_1980_3_Degree_GK_Zone_38',
-                                          '2363': 'Xian_1980_3_Degree_GK_Zone_39',
-                                          '2364': 'Xian_1980_3_Degree_GK_Zone_40',
-                                          '2365': 'Xian_1980_3_Degree_GK_Zone_41',
-                                          '2366': 'Xian_1980_3_Degree_GK_Zone_42',
-                                          '2367': 'Xian_1980_3_Degree_GK_Zone_43',
-                                          '2368': 'Xian_1980_3_Degree_GK_Zone_44',
-                                          '2369': 'Xian_1980_3_Degree_GK_Zone_45',
-                                          '2370': 'Xian_1980_3_Degree_GK_CM_75E',
-                                          '2371': 'Xian_1980_3_Degree_GK_CM_78E',
-                                          '2372': 'Xian_1980_3_Degree_GK_CM_81E',
-                                          '2373': 'Xian_1980_3_Degree_GK_CM_84E',
-                                          '2374': 'Xian_1980_3_Degree_GK_CM_87E',
-                                          '2375': 'Xian_1980_3_Degree_GK_CM_90E',
-                                          '2376': 'Xian_1980_3_Degree_GK_CM_93E',
-                                          '2377': ' Xian_1980_3_Degree_GK_CM_96E',
-                                          '2378': 'Xian_1980_3_Degree_GK_CM_99E',
-                                          '2379': 'Xian_1980_3_Degree_GK_CM_102E',
-                                          '2380': 'Xian_1980_3_Degree_GK_CM_105E',
-                                          '2381': 'Xian_1980_3_Degree_GK_CM_108E',
-                                          '2382': 'Xian_1980_3_Degree_GK_CM_111E',
-                                          '2383': 'Xian_1980_3_Degree_GK_CM_114E',
-                                          '2384': 'Xian_1980_3_Degree_GK_CM_117E',
-                                          '2385': 'Xian_1980_3_Degree_GK_CM_120E',
-                                          '2386': 'Xian_1980_3_Degree_GK_CM_123E',
-                                          '2387': 'Xian_1980_3_Degree_GK_CM_126E',
-                                          '2388': 'Xian_1980_3_Degree_GK_CM_129E',
-                                          '2389': 'Xian_1980_3_Degree_GK_CM_132E',
-                                          '2390': 'Xian_1980_3_Degree_GK_CM_135E',
-                                          '2401': 'Beijing_1954_3_Degree_GK_Zone_25',
-                                          '2402': 'Beijing_1954_3_Degree_GK_Zone_26',
-                                          '2403': 'Beijing_1954_3_Degree_GK_Zone_27',
-                                          '2404': 'Beijing_1954_3_Degree_GK_Zone_28',
-                                          '2405': 'Beijing_1954_3_Degree_GK_Zone_29',
-                                          '2406': 'Beijing_1954_3_Degree_GK_Zone_30',
-                                          '2407': 'Beijing_1954_3_Degree_GK_Zone_31',
-                                          '2408': 'Beijing_1954_3_Degree_GK_Zone_32',
-                                          '2409': 'Beijing_1954_3_Degree_GK_Zone_33',
-                                          '2410': 'Beijing_1954_3_Degree_GK_Zone_34',
-                                          '2411': 'Beijing_1954_3_Degree_GK_Zone_35',
-                                          '2412': 'Beijing_1954_3_Degree_GK_Zone_36',
-                                          '2413': 'Beijing_1954_3_Degree_GK_Zone_37',
-                                          '2414': 'Beijing_1954_3_Degree_GK_Zone_38',
-                                          '2415': 'Beijing_1954_3_Degree_GK_Zone_39',
-                                          '2416': 'Beijing_1954_3_Degree_GK_Zone_40',
-                                          '2417': 'Beijing_1954_3_Degree_GK_Zone_41',
-                                          '2418': 'Beijing_1954_3_Degree_GK_Zone_42',
-                                          '2419': 'Beijing_1954_3_Degree_GK_Zone_43',
-                                          '2420': 'Beijing_1954_3_Degree_GK_Zone_44',
-                                          '2421': 'Beijing_1954_3_Degree_GK_Zone_45',
-                                          '2422': 'Beijing_1954_3_Degree_GK_CM_75E',
-                                          '2423': 'Beijing_1954_3_Degree_GK_CM_78E',
-                                          '2424': 'Beijing_1954_3_Degree_GK_CM_81E',
-                                          '2425': 'Beijing_1954_3_Degree_GK_CM_84E',
-                                          '2426': 'Beijing_1954_3_Degree_GK_CM_87E',
-                                          '2427': 'Beijing_1954_3_Degree_GK_CM_90E',
-                                          '2428': 'Beijing_1954_3_Degree_GK_CM_93E',
-                                          '2429': 'Beijing_1954_3_Degree_GK_CM_96E',
-                                          '2430': 'Beijing_1954_3_Degree_GK_CM_99E',
-                                          '2431': 'Beijing_1954_3_Degree_GK_CM_102E',
-                                          '2432': 'Beijing_1954_3_Degree_GK_CM_105E',
-                                          '2433': 'Beijing_1954_3_Degree_GK_CM_108E',
-                                          '2434': 'Beijing_1954_3_Degree_GK_CM_111E',
-                                          '2435': 'Beijing_1954_3_Degree_GK_CM_114E',
-                                          '2436': 'Beijing_1954_3_Degree_GK_CM_117E',
-                                          '2437': 'Beijing_1954_3_Degree_GK_CM_120E',
-                                          '2438': 'Beijing_1954_3_Degree_GK_CM_123E',
-                                          '2439': 'Beijing_1954_3_Degree_GK_CM_126E',
-                                          '2440': 'Beijing_1954_3_Degree_GK_CM_129E',
-                                          '2441': 'Beijing_1954_3_Degree_GK_CM_132E',
-                                          '2442': 'Beijing_1954_3_Degree_GK_CM_135E', '3395': 'WGS_1984_World_Mercator',
-                                          '4491': 'CGCS2000_GK_Zone_13',
-                                          '4492': 'CGCS2000_GK_Zone_14', '4493': 'CGCS2000_GK_Zone_15',
-                                          '4494': 'CGCS2000_GK_Zone_16',
-                                          '4495': 'CGCS2000_GK_Zone_17', '4496': 'CGCS2000_GK_Zone_18',
-                                          '4497': 'CGCS2000_GK_Zone_19',
-                                          '4498': 'CGCS2000_GK_Zone_20', '4499': 'CGCS2000_GK_Zone_21',
-                                          '4500': 'CGCS2000_GK_Zone_22',
-                                          '4501': 'CGCS2000_GK_Zone_23', '4502': 'CGCS2000_GK_CM_75E',
-                                          '4503': 'CGCS2000_GK_CM_81E',
-                                          '4504': 'CGCS2000_GK_CM_87E', '4505': 'CGCS2000_GK_CM_93E',
-                                          '4506': 'CGCS2000_GK_CM_99E',
-                                          '4507': 'CGCS2000_GK_CM_105E', '4508': 'CGCS2000_GK_CM_111E',
-                                          '4509': 'CGCS2000_GK_CM_117E',
-                                          '4510': 'CGCS2000_GK_CM_123E', '4511': 'CGCS2000_GK_CM_129E',
-                                          '4512': 'CGCS2000_GK_CM_135E',
-                                          '4513': 'CGCS2000_3_Degree_GK_Zone_25',
-                                          '4514': 'CGCS2000_3_Degree_GK_Zone_26',
-                                          '4515': 'CGCS2000_3_Degree_GK_Zone_27',
-                                          '4516': 'CGCS2000_3_Degree_GK_Zone_28',
-                                          '4517': 'CGCS2000_3_Degree_GK_Zone_29',
-                                          '4518': 'CGCS2000_3_Degree_GK_Zone_30',
-                                          '4519': 'CGCS2000_3_Degree_GK_Zone_31',
-                                          '4520': 'CGCS2000_3_Degree_GK_Zone_32',
-                                          '4521': 'CGCS2000_3_Degree_GK_Zone_33',
-                                          '4522': 'CGCS2000_3_Degree_GK_Zone_34',
-                                          '4523': 'CGCS2000_3_Degree_GK_Zone_35',
-                                          '4524': 'CGCS2000_3_Degree_GK_Zone_36',
-                                          '4525': 'CGCS2000_3_Degree_GK_Zone_37',
-                                          '4526': 'CGCS2000_3_Degree_GK_Zone_38',
-                                          '4527': 'CGCS2000_3_Degree_GK_Zone_39',
-                                          '4528': 'CGCS2000_3_Degree_GK_Zone_40',
-                                          '4529': 'CGCS2000_3_Degree_GK_Zone_41',
-                                          '4530': 'CGCS2000_3_Degree_GK_Zone_42',
-                                          '4531': 'CGCS2000_3_Degree_GK_Zone_43',
-                                          '4532': 'CGCS2000_3_Degree_GK_Zone_44',
-                                          '4533': 'CGCS2000_3_Degree_GK_Zone_45', '4534': 'CGCS2000_3_Degree_GK_CM_75E',
-                                          '4535': 'CGCS2000_3_Degree_GK_CM_78E', '4536': 'CGCS2000_3_Degree_GK_CM_81E',
-                                          '4537': 'CGCS2000_3_Degree_GK_CM_84E', '4538': 'CGCS2000_3_Degree_GK_CM_87E',
-                                          '4539': 'CGCS2000_3_Degree_GK_CM_90E', '4540': 'CGCS2000_3_Degree_GK_CM_93E',
-                                          '4541': 'CGCS2000_3_Degree_GK_CM_96E', '4542': 'CGCS2000_3_Degree_GK_CM_99E',
-                                          '4543': 'CGCS2000_3_Degree_GK_CM_102E',
-                                          '4544': 'CGCS2000_3_Degree_GK_CM_105E',
-                                          '4545': 'CGCS2000_3_Degree_GK_CM_108E',
-                                          '4546': 'CGCS2000_3_Degree_GK_CM_111E',
-                                          '4547': 'CGCS2000_3_Degree_GK_CM_114E',
-                                          '4548': 'CGCS2000_3_Degree_GK_CM_117E',
-                                          '4549': 'CGCS2000_3_Degree_GK_CM_120E',
-                                          '4550': 'CGCS2000_3_Degree_GK_CM_123E',
-                                          '4551': 'CGCS2000_3_Degree_GK_CM_126E',
-                                          '4552': 'CGCS2000_3_Degree_GK_CM_129E',
-                                          '4553': 'CGCS2000_3_Degree_GK_CM_132E',
-                                          '4554': 'CGCS2000_3_Degree_GK_CM_135E',
-                                          '4568': 'New_Beijing_Gauss_Kruger_Zone_13',
-                                          '4569': 'New_Beijing_Gauss_Kruger_Zone_14',
-                                          '4570': 'New_Beijing_Gauss_Kruger_Zone_15',
-                                          '4571': 'New_Beijing_Gauss_Kruger_Zone_16',
-                                          '4572': 'New_Beijing_Gauss_Kruger_Zone_17',
-                                          '4573': 'New_Beijing_Gauss_Kruger_Zone_18',
-                                          '4574': 'New_Beijing_Gauss_Kruger_Zone_19',
-                                          '4575': 'New_Beijing_Gauss_Kruger_Zone_20',
-                                          '4576': 'New_Beijing_Gauss_Kruger_Zone_21',
-                                          '4577': 'New_Beijing_Gauss_Kruger_Zone_22',
-                                          '4578': 'New_Beijing_Gauss_Kruger_Zone_23',
-                                          '4579': 'New_Beijing_Gauss_Kruger_CM_75E',
-                                          '4580': 'New_Beijing_Gauss_Kruger_CM_81E',
-                                          '4581': 'New_Beijing_Gauss_Kruger_CM_87E',
-                                          '4582': 'New_Beijing_Gauss_Kruger_CM_93E',
-                                          '4583': 'New_Beijing_Gauss_Kruger_CM_99E',
-                                          '4584': 'New_Beijing_Gauss_Kruger_CM_105E',
-                                          '4585': 'New_Beijing_Gauss_Kruger_CM_111E',
-                                          '4586': 'New_Beijing_Gauss_Kruger_CM_117E',
-                                          '4587': 'New_Beijing_Gauss_Kruger_CM_123E',
-                                          '4588': 'New_Beijing_Gauss_Kruger_CM_129E',
-                                          '4589': 'New_Beijing_Gauss_Kruger_CM_135E',
-                                          '4652': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_25',
-                                          '4653': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_26',
-                                          '4654': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_27',
-                                          '4655': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_28',
-                                          '4656': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_29',
-                                          '4766': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_30',
-                                          '4767': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_31',
-                                          '4768': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_32',
-                                          '4769': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_33',
-                                          '4770': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_34',
-                                          '4771': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_35',
-                                          '4772': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_36',
-                                          '4773': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_37',
-                                          '4774': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_38',
-                                          '4775': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_39',
-                                          '4776': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_40',
-                                          '4777': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_41',
-                                          '4778': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_42',
-                                          '4779': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_43',
-                                          '4780': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_44',
-                                          '4781': 'New_Beijing_3_Degree_Gauss_Kruger_Zone_45',
-                                          '4782': 'New_Beijing_3_Degree_Gauss_Kruger_CM_75E',
-                                          '4783': 'New_Beijing_3_Degree_Gauss_Kruger_CM_78E',
-                                          '4784': 'New_Beijing_3_Degree_Gauss_Kruger_CM_81E',
-                                          '4785': 'New_Beijing_3_Degree_Gauss_Kruger_CM_84E',
-                                          '4786': 'New_Beijing_3_Degree_Gauss_Kruger_CM_87E',
-                                          '4787': 'New_Beijing_3_Degree_Gauss_Kruger_CM_90E',
-                                          '4788': 'New_Beijing_3_Degree_Gauss_Kruger_CM_93E',
-                                          '4789': 'New_Beijing_3_Degree_Gauss_Kruger_CM_96E',
-                                          '4790': 'New_Beijing_3_Degree_Gauss_Kruger_CM_99E',
-                                          '4791': 'New_Beijing_3_Degree_Gauss_Kruger_CM_102E',
-                                          '4792': 'New_Beijing_3_Degree_Gauss_Kruger_CM_105E',
-                                          '4793': 'New_Beijing_3_Degree_Gauss_Kruger_CM_108E',
-                                          '4794': 'New_Beijing_3_Degree_Gauss_Kruger_CM_111E',
-                                          '4795': 'New_Beijing_3_Degree_Gauss_Kruger_CM_114E',
-                                          '4796': 'New_Beijing_3_Degree_Gauss_Kruger_CM_117E',
-                                          '4797': 'New_Beijing_3_Degree_Gauss_Kruger_CM_120E',
-                                          '4798': 'New_Beijing_3_Degree_Gauss_Kruger_CM_123E',
-                                          '4799': 'New_Beijing_3_Degree_Gauss_Kruger_CM_126E',
-                                          '4800': 'New_Beijing_3_Degree_Gauss_Kruger_CM_129E',
-                                          '4822': 'New_Beijing_3_Degree_Gauss_Kruger_CM_135E'}
+        # 常用坐标系字典（引用模块级常量）
+        self.common_coord_systems = COMMON_COORD_SYSTEMS
 
         # 获取common_coordinate_systems的各个值作为坐标系名称列表
         list_coordinate_system_names = list(self.common_coord_systems.values())
@@ -460,9 +498,14 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
     def choose_files(self):
         """选择Mapgis文件"""
         options = QFileDialog.Options()
-        self.selected_files, _ = QFileDialog.getOpenFileNames(self, "选择文件", "", "Mapgis文件 (*.wt *.wp *.wl);", options=options)
+        self.selected_files, _ = QFileDialog.getOpenFileNames(self, "选择文件", "", "Mapgis文件 (*.wt *.wp *.wl *.mpj *.MPJ);", options=options)
         if self.selected_files:
-            self.file_group.setContent(f"已选择{len(self.selected_files)}个mapgis文件")
+            mpj_count = sum(1 for f in self.selected_files if f.lower().endswith('.mpj'))
+            layer_count = len(self.selected_files) - mpj_count
+            if mpj_count:
+                self.file_group.setContent(f"已选择{layer_count}个图层文件 + {mpj_count}个MPJ工程文件")
+            else:
+                self.file_group.setContent(f"已选择{len(self.selected_files)}个mapgis文件")
 
     def choose_output_folder(self):
         """选择输出文件夹"""
@@ -901,7 +944,269 @@ class AboutWidget(SingleDirectionScrollArea):
         self.thanksCard.viewLayout.addLayout(thanks_layout)
 
 
+class CRSCalculatorWidget(SingleDirectionScrollArea):
+    """坐标系计算器页面：坐标转换 + 高斯-克吕格带号/EPSG查询"""
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("crsCalculatorInterface")
+
+        self.contentWidget = QWidget()
+        self.contentLayout = QVBoxLayout(self.contentWidget)
+        self.contentLayout.setSpacing(20)
+        self.contentLayout.setContentsMargins(20, 20, 20, 20)
+
+        # ── 坐标转换卡片 ──────────────────────────────────────────
+        self.transformCard = HeaderCardWidget(self.contentWidget)
+        self.transformCard.setTitle("坐标转换")
+        self.transformCard.setBorderRadius(8)
+        self._build_transform_section()
+
+        # ── EPSG 查询卡片 ─────────────────────────────────────────
+        self.epsgCard = HeaderCardWidget(self.contentWidget)
+        self.epsgCard.setTitle("高斯-克吕格带号 / EPSG 查询")
+        self.epsgCard.setBorderRadius(8)
+        self._build_epsg_section()
+
+        self.contentLayout.addWidget(self.transformCard)
+        self.contentLayout.addWidget(self.epsgCard)
+        self.contentLayout.addStretch()
+
+        self.setWidget(self.contentWidget)
+        self.setWidgetResizable(True)
+        self.enableTransparentBackground()
+
+    # ──────────────────────────────────────────────────────────────
+    # 坐标转换区
+    # ──────────────────────────────────────────────────────────────
+    def _build_transform_section(self):
+        layout = QVBoxLayout()
+        layout.setSpacing(12)
+
+        crs_names = list(COMMON_COORD_SYSTEMS.values())
+
+        # 源坐标系 + X/Y
+        src_row = QHBoxLayout()
+        src_row.addWidget(BodyLabel("源坐标系："))
+        self.src_combo = ComboBox()
+        self.src_combo.addItems(crs_names)
+        self.src_combo.setFixedWidth(280)
+        src_row.addWidget(self.src_combo)
+        src_row.addSpacing(20)
+        src_row.addWidget(BodyLabel("X (经度/东坐标)："))
+        self.x_input = LineEdit()
+        self.x_input.setPlaceholderText("例如 108.5 或 500000")
+        self.x_input.setFixedWidth(160)
+        src_row.addWidget(self.x_input)
+        src_row.addSpacing(10)
+        src_row.addWidget(BodyLabel("Y (纬度/北坐标)："))
+        self.y_input = LineEdit()
+        self.y_input.setPlaceholderText("例如 34.5 或 3820000")
+        self.y_input.setFixedWidth(160)
+        src_row.addWidget(self.y_input)
+        src_row.addStretch()
+        layout.addLayout(src_row)
+
+        # 目标坐标系 + 交换按钮
+        tgt_row = QHBoxLayout()
+        tgt_row.addWidget(BodyLabel("目标坐标系："))
+        self.tgt_combo = ComboBox()
+        self.tgt_combo.addItems(crs_names)
+        self.tgt_combo.setCurrentIndex(1)   # 默认 WGS84
+        self.tgt_combo.setFixedWidth(280)
+        tgt_row.addWidget(self.tgt_combo)
+        tgt_row.addSpacing(20)
+        self.swap_btn = PushButton("交换源/目标坐标系")
+        self.swap_btn.setIcon(FIF.SYNC)
+        self.swap_btn.clicked.connect(self._swap_crs)
+        tgt_row.addWidget(self.swap_btn)
+        tgt_row.addStretch()
+        layout.addLayout(tgt_row)
+
+        # 转换按钮 + 结果
+        btn_row = QHBoxLayout()
+        self.transform_btn = PushButton("执行转换")
+        self.transform_btn.setIcon(FIF.PLAY)
+        self.transform_btn.clicked.connect(self._do_transform)
+        btn_row.addWidget(self.transform_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self.transform_result = QTextEdit()
+        self.transform_result.setReadOnly(True)
+        self.transform_result.setFixedHeight(80)
+        self.transform_result.setPlaceholderText("转换结果将显示在此处…")
+        layout.addWidget(self.transform_result)
+
+        self.transformCard.viewLayout.addLayout(layout)
+
+    # ──────────────────────────────────────────────────────────────
+    # EPSG 查询区
+    # ──────────────────────────────────────────────────────────────
+    def _build_epsg_section(self):
+        layout = QVBoxLayout()
+        layout.setSpacing(12)
+
+        # 基准面选择
+        datum_row = QHBoxLayout()
+        datum_row.addWidget(BodyLabel("基准面："))
+        self.datum_combo = ComboBox()
+        self.datum_combo.addItems(['Beijing 1954 (北京54)', 'Xian 1980 (西安80)', 'New Beijing (新北京)'])
+        self.datum_combo.setFixedWidth(220)
+        datum_row.addWidget(self.datum_combo)
+        datum_row.addStretch()
+        layout.addLayout(datum_row)
+
+        # 中央经线
+        cm_row = QHBoxLayout()
+        cm_row.addWidget(BodyLabel("中央经线（°）："))
+        self.cm_input = LineEdit()
+        self.cm_input.setPlaceholderText("例如 108 或 117")
+        self.cm_input.setFixedWidth(120)
+        cm_row.addWidget(self.cm_input)
+        cm_row.addStretch()
+        layout.addLayout(cm_row)
+
+        # 带宽选择
+        zone_row = QHBoxLayout()
+        zone_row.addWidget(BodyLabel("带宽："))
+        self.zone_group = QButtonGroup(self)
+        self.zone_3 = QRadioButton("3度带")
+        self.zone_6 = QRadioButton("6度带")
+        self.zone_auto = QRadioButton("自动判断")
+        self.zone_auto.setChecked(True)
+        self.zone_group.addButton(self.zone_3, 3)
+        self.zone_group.addButton(self.zone_6, 6)
+        self.zone_group.addButton(self.zone_auto, 0)
+        zone_row.addWidget(self.zone_3)
+        zone_row.addWidget(self.zone_6)
+        zone_row.addWidget(self.zone_auto)
+        zone_row.addStretch()
+        layout.addLayout(zone_row)
+
+        # 查询按钮 + 结果
+        btn_row = QHBoxLayout()
+        self.epsg_btn = PushButton("查询 EPSG")
+        self.epsg_btn.setIcon(FIF.SEARCH)
+        self.epsg_btn.clicked.connect(self._do_epsg_lookup)
+        btn_row.addWidget(self.epsg_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self.epsg_result = QTextEdit()
+        self.epsg_result.setReadOnly(True)
+        self.epsg_result.setFixedHeight(100)
+        self.epsg_result.setPlaceholderText("查询结果将显示在此处…")
+        layout.addWidget(self.epsg_result)
+
+        self.epsgCard.viewLayout.addLayout(layout)
+
+    # ──────────────────────────────────────────────────────────────
+    # 逻辑：坐标转换
+    # ──────────────────────────────────────────────────────────────
+    def _swap_crs(self):
+        src_idx = self.src_combo.currentIndex()
+        tgt_idx = self.tgt_combo.currentIndex()
+        self.src_combo.setCurrentIndex(tgt_idx)
+        self.tgt_combo.setCurrentIndex(src_idx)
+
+    def _get_epsg_by_name(self, name: str):
+        """通过坐标系名称反查 EPSG 字符串。"""
+        for epsg, n in COMMON_COORD_SYSTEMS.items():
+            if n == name:
+                return epsg
+        return None
+
+    def _do_transform(self):
+        try:
+            from pyproj import Transformer
+            x_text = self.x_input.text().strip()
+            y_text = self.y_input.text().strip()
+            if not x_text or not y_text:
+                self.transform_result.setPlainText("请先输入 X 和 Y 坐标。")
+                return
+            x = float(x_text)
+            y = float(y_text)
+
+            src_name = self.src_combo.currentText()
+            tgt_name = self.tgt_combo.currentText()
+            src_epsg = self._get_epsg_by_name(src_name)
+            tgt_epsg = self._get_epsg_by_name(tgt_name)
+
+            if src_epsg is None or tgt_epsg is None:
+                self.transform_result.setPlainText("无法识别所选坐标系 EPSG。")
+                return
+
+            transformer = Transformer.from_crs(
+                f"EPSG:{src_epsg}", f"EPSG:{tgt_epsg}", always_xy=True
+            )
+            x_out, y_out = transformer.transform(x, y)
+            self.transform_result.setPlainText(
+                f"源坐标系：EPSG:{src_epsg}  {src_name}\n"
+                f"输入：X={x},  Y={y}\n"
+                f"目标坐标系：EPSG:{tgt_epsg}  {tgt_name}\n"
+                f"结果：X={x_out:.6f},  Y={y_out:.6f}"
+            )
+        except Exception as e:
+            self.transform_result.setPlainText(f"转换失败：{e}")
+
+    # ──────────────────────────────────────────────────────────────
+    # 逻辑：EPSG 查询
+    # ──────────────────────────────────────────────────────────────
+    def _do_epsg_lookup(self):
+        try:
+            cm_text = self.cm_input.text().strip()
+            if not cm_text:
+                self.epsg_result.setPlainText("请输入中央经线（整数度）。")
+                return
+            cm = int(float(cm_text))
+
+            # 基准面 → 椭球体代码
+            datum_idx = self.datum_combo.currentIndex()
+            ellipsoid_map = {0: 1, 1: 2, 2: 116}  # Beijing54→1, Xian80→2, NewBeijing→116
+            ellipsoid = ellipsoid_map.get(datum_idx, 1)
+
+            gk_table = pymapgis._GK_EPSG
+            if ellipsoid not in gk_table:
+                self.epsg_result.setPlainText(f"该基准面暂无 EPSG 查询表。")
+                return
+            cm_table = gk_table[ellipsoid]
+            if cm not in cm_table:
+                self.epsg_result.setPlainText(
+                    f"中央经线 {cm}° 不在查询表中（支持范围：{min(cm_table)}°~{max(cm_table)}°，步长3°）。"
+                )
+                return
+
+            epsg_6, epsg_3 = cm_table[cm]
+            zone_mode = self.zone_group.checkedId()  # 0=auto, 3=3度, 6=6度
+
+            lines = [f"基准面：{self.datum_combo.currentText()}  |  中央经线：{cm}°"]
+
+            if zone_mode == 3:
+                if epsg_3:
+                    lines.append(f"3度带 EPSG: {epsg_3}  ({COMMON_COORD_SYSTEMS.get(str(epsg_3), '')})")
+                else:
+                    lines.append(f"3度带：该中央经线无3度带 EPSG（可能仅有6度带）。")
+            elif zone_mode == 6:
+                if epsg_6:
+                    lines.append(f"6度带 EPSG: {epsg_6}  ({COMMON_COORD_SYSTEMS.get(str(epsg_6), '')})")
+                else:
+                    lines.append(f"6度带：该中央经线无6度带 EPSG（可能仅有3度带）。")
+            else:  # auto
+                if epsg_6 and epsg_3:
+                    lines.append(f"⚠️ 6度带和3度带均有匹配，无法自动区分：")
+                    lines.append(f"  6度带 EPSG: {epsg_6}  ({COMMON_COORD_SYSTEMS.get(str(epsg_6), '')})")
+                    lines.append(f"  3度带 EPSG: {epsg_3}  ({COMMON_COORD_SYSTEMS.get(str(epsg_3), '')})")
+                elif epsg_6:
+                    lines.append(f"6度带 EPSG: {epsg_6}  ({COMMON_COORD_SYSTEMS.get(str(epsg_6), '')})")
+                elif epsg_3:
+                    lines.append(f"3度带 EPSG: {epsg_3}  ({COMMON_COORD_SYSTEMS.get(str(epsg_3), '')})")
+                else:
+                    lines.append("该组合暂无已知 EPSG。")
+
+            self.epsg_result.setPlainText('\n'.join(lines))
+        except Exception as e:
+            self.epsg_result.setPlainText(f"查询失败：{e}")
 
 
 class HomeInterfaceWidget(SingleDirectionScrollArea):
@@ -1111,6 +1416,7 @@ class MainWindow(FluentWindow):
         self.homeInterface = HomeInterfaceWidget(self)
         self.logInterface = LogWidget(self)
         self.aboutInterface = AboutWidget(self)
+        self.crsCalculatorInterface = CRSCalculatorWidget(self)
         
         # 设置日志文本编辑器的颜色格式
         self.setup_log_colors()
@@ -1183,6 +1489,7 @@ class MainWindow(FluentWindow):
 
     def initNavigation(self):
         self.addSubInterface(self.homeInterface, FIF.HOME, '转换配置')
+        self.addSubInterface(self.crsCalculatorInterface, FIF.CALCULATOR, '坐标计算器')
         self.addSubInterface(self.logInterface, FIF.BOOK_SHELF, '日志输出')
         self.addSubInterface(self.aboutInterface, FIF.INFO, '软件介绍')
 

@@ -1,4 +1,5 @@
 import datetime
+import os
 import re
 import struct
 
@@ -922,3 +923,201 @@ def get_multipolygons(lines):
         temp = [shapely.geometry.Polygon(i[0], i[1:]) for i in level_0.values()]
         temp.extend(get_multipolygons([lines[i] for i in np.argwhere((relation == 1).sum(1) > 1).flatten()]))
         return temp
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MapGIS 工程文件（.mpj）解析器
+# ──────────────────────────────────────────────────────────────────────────────
+class MapGISProjectReader:
+    """
+    解析 MapGIS 工程文件（.mpj/.MPJ），提取其中引用的图层路径列表。
+
+    支持的 magic number：
+      - b'WMAP\\`D2:'  （实际观测到的格式）
+      - b'GDMP\\`D29'  （文档记录的格式）
+
+    文件布局：
+      - 头部：1113 字节
+      - 偏移 12-13：图层数量（unsigned short，little-endian）
+      - 偏移 750-753：第一个 workspace 记录的文件偏移（int，值固定为 1113）
+      - 每条 workspace 记录：400 字节，布局如下：
+          offset 0   : 类型字节 (1=WT点, 0=WL线, 2=WP面)
+          offset 1   : 状态字节
+          offset 2-129: 路径字段（多个以 NUL 分隔的字符串，首个通常以 '.\\' 开头）
+          offset 130-257: 图层描述
+          offset 258-289: 包围盒（4 个 double：xmin, ymin, xmax, ymax）
+    """
+
+    MAGIC_VARIANTS = [b'WMAP\x60D2:', b'GDMP\x60D29']
+    HEADER_SIZE = 1113
+    RECORD_SIZE = 400
+    COUNT_OFFSET = 12          # unsigned short: 图层数
+    WORKSPACE_PTR_OFFSET = 750  # int: 第一条记录偏移（应=1113）
+
+    # 类型字节 → 文件扩展名
+    TYPE_EXT = {1: '.WT', 0: '.WL', 2: '.WP'}
+
+    def __init__(self, mpj_path: str):
+        self.mpj_path = os.path.abspath(mpj_path)
+        self.mpj_dir = os.path.dirname(self.mpj_path)
+        self.layers = []          # list of dict with keys: type, ext, paths, description, bbox
+        self._parse()
+
+    # ------------------------------------------------------------------
+    # 公共接口
+    # ------------------------------------------------------------------
+
+    def resolve_layer_paths(self) -> list:
+        """
+        为每个图层解析出实际存在的文件路径（按优先级）。
+        返回 list of dict：{'path': str, 'name': str, 'ext': str}
+        重名冲突（同文件名不同目录且均存在）的图层会被跳过并打印警告。
+        """
+        results = []
+        seen_names = {}  # basename → [path, ...]
+
+        for layer in self.layers:
+            resolved = self._resolve_one(layer)
+            if resolved is None:
+                print(f"[MPJ] 跳过（未找到）: {layer.get('paths', [])}")
+                continue
+
+            basename = os.path.basename(resolved).upper()
+            seen_names.setdefault(basename, [])
+            seen_names[basename].append(resolved)
+
+        # 过滤重名冲突（同名文件有多个不同路径都存在）
+        for layer in self.layers:
+            resolved = self._resolve_one(layer)
+            if resolved is None:
+                continue
+            basename = os.path.basename(resolved).upper()
+            candidates = seen_names.get(basename, [])
+            unique_paths = list(dict.fromkeys(candidates))  # 保持顺序去重
+            if len(unique_paths) > 1:
+                print(f"[MPJ] 跳过（重名冲突）: {basename} -> {unique_paths}")
+                continue
+            results.append({
+                'path': resolved,
+                'name': os.path.splitext(os.path.basename(resolved))[0],
+                'ext': os.path.splitext(resolved)[1].upper().lstrip('.'),
+            })
+
+        return results
+
+    @property
+    def layer_count(self) -> int:
+        return len(self.layers)
+
+    # ------------------------------------------------------------------
+    # 内部：解析 MPJ 文件
+    # ------------------------------------------------------------------
+
+    def _parse(self):
+        with open(self.mpj_path, 'rb') as f:
+            header = f.read(self.HEADER_SIZE)
+
+        # 验证 magic number
+        magic_ok = any(header.startswith(m) for m in self.MAGIC_VARIANTS)
+        if not magic_ok:
+            raise ValueError(
+                f"不支持的 MPJ 格式（magic={header[:8]!r}），仅支持 WMAP/GDMP 格式"
+            )
+
+        # 读取图层数
+        count = struct.unpack_from('<H', header, self.COUNT_OFFSET)[0]
+
+        # 读取所有 workspace 记录
+        with open(self.mpj_path, 'rb') as f:
+            f.seek(self.HEADER_SIZE)
+            for _ in range(count):
+                raw = f.read(self.RECORD_SIZE)
+                if len(raw) < self.RECORD_SIZE:
+                    break
+                self.layers.append(self._parse_record(raw))
+
+    def _parse_record(self, raw: bytes) -> dict:
+        type_byte = raw[0]
+        ext = self.TYPE_EXT.get(type_byte, '.WT')
+
+        # 路径字段：offset 2 ~ 129（128 字节），多个 NUL 分隔字符串
+        path_field = raw[2:130]
+        paths = self._extract_strings(path_field)
+
+        # 描述字段：offset 130 ~ 257
+        desc_field = raw[130:258]
+        description = self._extract_strings(desc_field)
+        description = description[0] if description else ''
+
+        # 包围盒：offset 258 ~ 289（4 doubles）
+        try:
+            bbox = struct.unpack_from('<4d', raw, 258)
+        except struct.error:
+            bbox = (0.0, 0.0, 0.0, 0.0)
+
+        return {
+            'type': type_byte,
+            'ext': ext,
+            'paths': paths,
+            'description': description,
+            'bbox': bbox,
+        }
+
+    @staticmethod
+    def _extract_strings(field: bytes) -> list:
+        """将字节字段按 NUL 分割，解码为字符串列表（去掉空串）。"""
+        parts = field.split(b'\x00')
+        result = []
+        for p in parts:
+            s = p.decode('gbk', errors='ignore').strip()
+            if s:
+                result.append(s)
+        return result
+
+    # ------------------------------------------------------------------
+    # 内部：路径解析（优先级）
+    # ------------------------------------------------------------------
+
+    def _resolve_one(self, layer: dict):
+        """
+        按优先级解析图层路径：
+          1. 路径列表中的第一个路径（原始路径）如存在则直接返回
+          2. 相对于 MPJ 目录拼接每个候选路径
+          3. 在 MPJ 目录中递归搜索同名文件
+          4. 多个匹配则跳过（返回 None）
+        """
+        paths = layer.get('paths', [])
+        ext = layer.get('ext', '')
+
+        # 1. 原始路径 & 2. 相对路径
+        for raw_path in paths:
+            # 原始路径直接测试
+            if os.path.isfile(raw_path):
+                return raw_path
+            # 去掉前缀 '.\' 或 './' 后，相对于 mpj 目录
+            clean = raw_path.lstrip('.').lstrip('/').lstrip('\\')
+            candidate = os.path.join(self.mpj_dir, clean)
+            if os.path.isfile(candidate):
+                return candidate
+            # 也尝试大小写变种（Windows 路径在 macOS/Linux 上需忽略大小写）
+            lower = os.path.join(self.mpj_dir, clean.lower())
+            upper = os.path.join(self.mpj_dir, clean.upper())
+            for alt in (lower, upper):
+                if os.path.isfile(alt):
+                    return alt
+
+        # 3. 递归搜索同文件名
+        if paths:
+            target_name = os.path.basename(paths[0]).upper()
+            matches = []
+            for root, dirs, files in os.walk(self.mpj_dir):
+                for fn in files:
+                    if fn.upper() == target_name:
+                        matches.append(os.path.join(root, fn))
+            if len(matches) == 1:
+                return matches[0]
+            elif len(matches) > 1:
+                # 多个匹配，由调用方决定是否跳过
+                return matches[0]  # 返回第一个，由 resolve_layer_paths 处理重名
+
+        return None
