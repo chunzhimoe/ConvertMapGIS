@@ -278,15 +278,17 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         finished_signal = pyqtSignal()
         progress_signal = pyqtSignal(int, int)  # 当前进度, 总数
 
-        def __init__(self, file_paths, output_dir, scale_text, projection_text, use_scale, use_proj, coord_systems, get_key_by_value_func, use_simple_naming, input_dir=None, parent=None):
+        def __init__(self, file_paths, output_dir, scale_text, use_scale,
+                     auto_detect_source_crs, source_wkid, target_wkid,
+                     get_key_by_value_func, use_simple_naming, input_dir=None, parent=None):
             super().__init__(parent)
             self.file_paths = file_paths      # list of individual files (file mode), or list of MPJ paths (folder mode)
             self.output_dir = output_dir
             self.scale_text = scale_text
-            self.projection_text = projection_text
             self.use_scale = use_scale
-            self.use_proj = use_proj
-            self.coord_systems = coord_systems
+            self.auto_detect_source_crs = auto_detect_source_crs
+            self.source_wkid = source_wkid    # int EPSG or None
+            self.target_wkid = target_wkid    # int EPSG or None
             self.get_key_by_value_func = get_key_by_value_func
             self.use_simple_naming = use_simple_naming
             self.input_dir = input_dir        # 文件夹模式的输入根目录（None = 文件模式）
@@ -347,21 +349,30 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                 output_subdir = task['output_subdir']
                 # 最终输出目录（文件夹模式带子目录，文件模式直接在 output_dir）
                 out_dir = os.path.join(self.output_dir, output_subdir) if output_subdir else self.output_dir
+                _progress_emitted = False  # 早退路径自己发射进度，避免双计
                 try:
                     start_time = time.time()
                     kwargs = {}
                     if self.use_scale:
                         kwargs['scale_factor'] = int(self.scale_text)
-                    if self.use_proj:
-                        wkid = self.get_key_by_value_func(self.coord_systems, self.projection_text)
-                        kwargs['wkid'] = wkid
+                    kwargs['auto_detect_source_crs'] = self.auto_detect_source_crs
+                    if self.source_wkid is not None:
+                        kwargs['source_wkid'] = self.source_wkid
+                    if self.target_wkid is not None:
+                        kwargs['target_wkid'] = self.target_wkid
                     reader = pymapgis.MapGisReader(mapgis_file, **kwargs)
                     file_base = os.path.splitext(os.path.basename(mapgis_file))[0]
                     file_ext = os.path.splitext(mapgis_file)[1][1:].upper()
 
-                    # 输出坐标系检测结果日志
+                    # ── 源坐标系日志 ──────────────────────────────────────────
                     det = getattr(reader, 'crs_detection', None)
-                    if det:
+                    if self.source_wkid is not None:
+                        # 手动指定源坐标系
+                        self.log_signal.emit(
+                            f"🌐 源坐标系手动指定 | EPSG:{self.source_wkid} | 文件: {os.path.basename(mapgis_file)}"
+                        )
+                    elif det:
+                        # 自动识别结果
                         epsg = det.get('detected_epsg')
                         conf = det.get('confidence', 'low')
                         datum = det.get('datum', '')
@@ -371,16 +382,36 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                         cm_str = f' | 中央经线: {cm:.1f}°' if cm is not None else ''
                         if epsg and conf == 'high':
                             self.log_signal.emit(
-                                f"🔍 坐标系自动检测 | 文件: {os.path.basename(mapgis_file)}"
-                                f" | 基准: {datum} | 投影: {proj_desc}{cm_str}"
-                                f" | 匹配 EPSG: {epsg}"
+                                f"🔍 源坐标系自动识别 | 文件: {os.path.basename(mapgis_file)}"
+                                f" | 基准: {datum} | 投影: {proj_desc}{cm_str} | EPSG:{epsg}"
                             )
-                        elif note:
+                        else:
+                            # 识别失败或模糊 → 跳过此文件
+                            reason = note if note else '椭球体/投影参数无法匹配已知坐标系'
                             self.log_signal.emit(
-                                f"🔍 坐标系自动检测 | 文件: {os.path.basename(mapgis_file)}"
-                                f" | 基准: {datum} | 投影: {proj_desc}{cm_str}"
-                                f" | ⚠️ {note}"
+                                f"⚠️ 跳过文件（源坐标系自动识别失败）| 文件: {os.path.basename(mapgis_file)}"
+                                f" | 原因: {reason}"
                             )
+                            current += 1
+                            _progress_emitted = True
+                            self.progress_signal.emit(current, total)
+                            continue
+
+                    # ── 目标坐标系日志 ────────────────────────────────────────
+                    if self.target_wkid is not None:
+                        self.log_signal.emit(
+                            f"🎯 重投影到目标坐标系 | EPSG:{self.target_wkid} | 文件: {os.path.basename(mapgis_file)}"
+                        )
+                        # 检查重投影是否发生错误
+                        reproj_err = getattr(reader, '_reprojection_error', None)
+                        if reproj_err:
+                            self.log_signal.emit(
+                                f"❌ 重投影失败 | 文件: {os.path.basename(mapgis_file)} | 错误: {reproj_err}"
+                            )
+                            current += 1
+                            _progress_emitted = True
+                            self.progress_signal.emit(current, total)
+                            continue
 
                     # 检查crs为空但未抛异常的特殊情况
                     if hasattr(reader, 'crs') and reader.crs == '':
@@ -442,8 +473,9 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                         self.log_signal.emit(
                             f"❌ 转换失败 | 文件：{os.path.basename(mapgis_file)} | 错误类型：{err_type} | 详情：{err_detail}"
                         )
-                current += 1
-                self.progress_signal.emit(current, total)
+                if not _progress_emitted:
+                    current += 1
+                    self.progress_signal.emit(current, total)
             self.log_signal.emit('🎉 全部转换完成！')
             self.finished_signal.emit()
 
@@ -513,40 +545,71 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.file_button.setFixedWidth(120)
         self.input_dir_button.setFixedWidth(130)
 
-        # 指定投影坐标系复选框
-        self.proj_checkbox = CheckBox('指定坐标系', self)
-        self.proj_checkbox.clicked.connect(self.toggle_projection_box)
-        self.projection_combo = ComboBox()
-
         # 常用坐标系字典（引用模块级常量）
         self.common_coord_systems = COMMON_COORD_SYSTEMS
-
-        # 获取common_coordinate_systems的各个值作为坐标系名称列表
         list_coordinate_system_names = list(self.common_coord_systems.values())
-        self.projection_combo.setFixedWidth(320)
-        self.projection_combo.addItems(list_coordinate_system_names)
-        self.projection_combo.setEnabled(False)
 
-        # 投影控件布局
-        self.projection_widget = QWidget()
-        self.projection_layout = QHBoxLayout(self.projection_widget)
-        self.projection_layout.setSpacing(50)
-        self.projection_layout.addWidget(self.proj_checkbox)
-        self.projection_layout.addWidget(self.projection_combo)
+        # ── 源坐标系设置 ──────────────────────────────────────────────────────
+        # "自动识别"单选 / "手动指定"单选 + 下拉
+        self.src_auto_radio  = QRadioButton("自动识别")
+        self.src_manual_radio = QRadioButton("手动指定")
+        self.src_auto_radio.setChecked(True)
+        self.src_crs_group = QButtonGroup(self)
+        self.src_crs_group.addButton(self.src_auto_radio,  0)
+        self.src_crs_group.addButton(self.src_manual_radio, 1)
+        self.src_crs_group.buttonClicked.connect(self._on_src_mode_changed)
+
+        self.src_combo = ComboBox()
+        self.src_combo.setFixedWidth(320)
+        self.src_combo.addItems(list_coordinate_system_names)
+        self.src_combo.setEnabled(False)
+
+        self.src_crs_widget = QWidget()
+        src_layout = QHBoxLayout(self.src_crs_widget)
+        src_layout.setSpacing(20)
+        src_layout.setContentsMargins(0, 0, 0, 0)
+        src_layout.addWidget(self.src_auto_radio)
+        src_layout.addWidget(self.src_manual_radio)
+        src_layout.addWidget(self.src_combo)
+        src_layout.addStretch()
+
+        # ── 目标坐标系设置 ────────────────────────────────────────────────────
+        # "自动（不转换）"单选 / "手动指定"单选 + 下拉
+        self.tgt_auto_radio  = QRadioButton("自动（不转换）")
+        self.tgt_manual_radio = QRadioButton("手动指定")
+        self.tgt_auto_radio.setChecked(True)
+        self.tgt_crs_group = QButtonGroup(self)
+        self.tgt_crs_group.addButton(self.tgt_auto_radio,  0)
+        self.tgt_crs_group.addButton(self.tgt_manual_radio, 1)
+        self.tgt_crs_group.buttonClicked.connect(self._on_tgt_mode_changed)
+
+        self.tgt_combo = ComboBox()
+        self.tgt_combo.setFixedWidth(320)
+        self.tgt_combo.addItems(list_coordinate_system_names)
+        self.tgt_combo.setEnabled(False)
+
+        self.tgt_crs_widget = QWidget()
+        tgt_layout = QHBoxLayout(self.tgt_crs_widget)
+        tgt_layout.setSpacing(20)
+        tgt_layout.setContentsMargins(0, 0, 0, 0)
+        tgt_layout.addWidget(self.tgt_auto_radio)
+        tgt_layout.addWidget(self.tgt_manual_radio)
+        tgt_layout.addWidget(self.tgt_combo)
+        tgt_layout.addStretch()
 
         # 文件命名方式单选框
         self.naming_checkbox = CheckBox('直接替换后缀', self)
         self.naming_checkbox.setToolTip('勾选后文件名直接替换后缀为shp，不勾选则保持原命名方式')
-        
+
         # 转换按钮
         self.convert_button = PushButton(text="开始转换")
         self.convert_button.clicked.connect(self.start_conversion)
-        
+
         # 保存日志勾选框（新增）
         self.save_log_checkbox = CheckBox('保存日志', self)
         self.save_log_checkbox.setChecked(True)
         self.save_log_checkbox.setToolTip('勾选后将转换日志保存到输出文件夹')
-        
+
         # 转换控件布局
         self.convert_widget = QWidget()
         self.convert_layout = QHBoxLayout(self.convert_widget)
@@ -561,7 +624,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.file_group = self.addGroup(get_resource_path("resource/文件.svg"), "选择Mapgis文件", "选择文件或工程文件夹（批量）", self.file_select_widget)
         self.folder_group = self.addGroup(get_resource_path("resource/文件夹.svg"), "选择输出文件夹", "选择转换后的文件输出路径", self.folder_button)
         self.addGroup(get_resource_path("resource/比例尺.png"), "指定比例尺 ", "设置指定转换的比例尺", self.scale_widget)
-        self.addGroup(get_resource_path("resource/坐标系.png"), "指定转换坐标系", "指定转换后的坐标系", self.projection_widget)
+        self.src_crs_card = self.addGroup(get_resource_path("resource/坐标系.png"), "源坐标系", "自动识别每个文件的源坐标系，或手动统一指定", self.src_crs_widget)
+        self.tgt_crs_card = self.addGroup(get_resource_path("resource/坐标系.png"), "目标坐标系", '统一转换到指定坐标系；"自动"表示保留各自源坐标系不重投影', self.tgt_crs_widget)
         self.convert_group = self.addGroup(get_resource_path("resource/开始.png"), "执行mapgis文件转换", "转换进度", self.convert_widget)
 
     def choose_files(self):
@@ -617,14 +681,149 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         """切换比例尺输入框可用状态"""
         self.scale_box.setEnabled(self.scale_checkbox.isChecked())
 
-    def toggle_projection_box(self):
-        """切换投影下拉框可用状态"""
-        self.projection_combo.setEnabled(self.proj_checkbox.isChecked())
+    def _on_src_mode_changed(self):
+        """源坐标系模式切换：自动/手动"""
+        self.src_combo.setEnabled(self.src_manual_radio.isChecked())
+
+    def _on_tgt_mode_changed(self):
+        """目标坐标系模式切换：自动/手动"""
+        self.tgt_combo.setEnabled(self.tgt_manual_radio.isChecked())
 
     @staticmethod
     def get_key_by_value(d, value):
         """通过value查找字典key"""
         return str([k for k, v in d.items() if v == value][0])
+
+    def _get_epsg_from_combo(self, combo):
+        """从 ComboBox 当前文本反查 EPSG 整数，找不到返回 None。"""
+        text = combo.currentText()
+        for epsg, name in COMMON_COORD_SYSTEMS.items():
+            if name == text:
+                return int(epsg)
+        return None
+
+    def _collect_all_layer_paths(self):
+        """收集所有待转换图层路径（用于 CRS 预检查）。
+        文件模式展开 MPJ，文件夹模式递归扫描 MPJ 并展开。
+        返回 list[str] — 各图层文件路径。
+        """
+        paths = []
+        if self.selected_input_dir:
+            for root, dirs, files in os.walk(self.selected_input_dir):
+                for fname in files:
+                    if fname.lower().endswith('.mpj'):
+                        try:
+                            proj = pymapgis.MapGISProjectReader(os.path.join(root, fname))
+                            for layer in proj.resolve_layer_paths():
+                                paths.append(layer['path'])
+                        except Exception:
+                            pass
+        else:
+            for path in (self.selected_files or []):
+                if path.lower().endswith('.mpj'):
+                    try:
+                        proj = pymapgis.MapGISProjectReader(path)
+                        for layer in proj.resolve_layer_paths():
+                            paths.append(layer['path'])
+                    except Exception:
+                        pass
+                else:
+                    paths.append(path)
+        return paths
+
+    def _show_crs_preview_dialog(self):
+        """扫描所有待转换图层的 CRS 元数据并显示汇总对话框。
+        返回 True 表示用户确认继续，False 表示取消。
+        """
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox, QLabel
+
+        all_paths = self._collect_all_layer_paths()
+        if not all_paths:
+            return True  # 无文件，直接跳过对话框
+
+        # 扫描每个文件的 CRS 元数据
+        epsg_groups = {}     # {epsg_int: [filename, ...]}
+        ambiguous = []       # [(filename, note)]
+        failed = []          # [(filename, error)]
+
+        for path in all_paths:
+            fname = os.path.basename(path)
+            meta = pymapgis.peek_crs(path)
+            if meta.get('error'):
+                failed.append((fname, meta['error']))
+                continue
+            det = meta.get('detection') or {}
+            epsg = det.get('detected_epsg')
+            conf = det.get('confidence', '')
+            note = det.get('note', '')
+            if epsg and conf == 'high':
+                epsg_groups.setdefault(epsg, []).append(fname)
+            else:
+                ambiguous.append((fname, note or '无法确定坐标系'))
+
+        # 构造汇总文本
+        total = len(all_paths)
+        lines = [f"共检测 {total} 个图层文件\n"]
+
+        if epsg_groups:
+            lines.append("── 识别成功 ──")
+            for epsg, fnames in sorted(epsg_groups.items()):
+                # 找出 EPSG 对应的显示名
+                crs_name = COMMON_COORD_SYSTEMS.get(str(epsg), f"EPSG:{epsg}")
+                lines.append(f"  {crs_name} (EPSG:{epsg})  ×{len(fnames)} 个文件")
+            lines.append("")
+
+        if len(epsg_groups) > 1:
+            if self.tgt_manual_radio.isChecked():
+                tgt_name = self.tgt_combo.currentText()
+                lines.append(f"⚠️ 检测到多种源坐标系，将统一重投影到目标坐标系：{tgt_name}")
+            else:
+                lines.append('⚠️ 检测到多种源坐标系，目标坐标系为"自动"，各文件将保留各自坐标系输出')
+            lines.append("")
+
+        if ambiguous:
+            lines.append(f"── 识别模糊（将跳过，共 {len(ambiguous)} 个）──")
+            for fname, note in ambiguous[:20]:
+                lines.append(f"  {fname}：{note}")
+            if len(ambiguous) > 20:
+                lines.append(f"  …（另 {len(ambiguous) - 20} 个未显示）")
+            lines.append("")
+
+        if failed:
+            lines.append(f"── 读取失败（将跳过，共 {len(failed)} 个）──")
+            for fname, err in failed[:10]:
+                lines.append(f"  {fname}：{err}")
+            if len(failed) > 10:
+                lines.append(f"  …（另 {len(failed) - 10} 个未显示）")
+            lines.append("")
+
+        # 若全部识别成功且只有一种 CRS，直接静默继续（不弹框）
+        if not ambiguous and not failed and len(epsg_groups) == 1:
+            return True
+
+        # 弹对话框
+        dlg = QDialog(self)
+        dlg.setWindowTitle("转换前坐标系预检查")
+        dlg.setMinimumWidth(520)
+        layout = QVBoxLayout(dlg)
+
+        label = QLabel("请确认以下坐标系检测结果后再继续转换：")
+        layout.addWidget(label)
+
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setPlainText('\n'.join(lines))
+        text_edit.setFixedHeight(280)
+        layout.addWidget(text_edit)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.button(QDialogButtonBox.Ok).setText("继续转换")
+        btn_box.button(QDialogButtonBox.Cancel).setText("取消")
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        layout.addWidget(btn_box)
+
+        return dlg.exec_() == QDialog.Accepted
 
     def start_conversion(self):
         """开始批量转换文件"""
@@ -655,6 +854,11 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         # 输出转换配置信息到日志窗口
         self.log_conversion_config()
 
+        # ── 仅在源坐标系为自动识别时才弹预检查对话框 ──────────────────────
+        if self.src_auto_radio.isChecked():
+            if not self._show_crs_preview_dialog():
+                return  # 用户取消
+
         # 获取当前时间作为日志文件名
         current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_filename = f"转换日志_{current_time}.txt"
@@ -680,14 +884,19 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             file_paths_arg = self.selected_files
             input_dir_arg = None
 
+        # 解析源/目标坐标系参数
+        auto_detect_src = self.src_auto_radio.isChecked()
+        source_wkid = None if auto_detect_src else self._get_epsg_from_combo(self.src_combo)
+        target_wkid = None if self.tgt_auto_radio.isChecked() else self._get_epsg_from_combo(self.tgt_combo)
+
         self.convert_thread = self.ConvertThread(
             file_paths_arg,
             self.output_dir,
             self.scale_box.text(),
-            self.projection_combo.text(),
             self.scale_checkbox.isChecked(),
-            self.proj_checkbox.isChecked(),
-            self.common_coord_systems,
+            auto_detect_src,
+            source_wkid,
+            target_wkid,
             self.get_key_by_value,
             self.naming_checkbox.isChecked(),
             input_dir=input_dir_arg
@@ -699,6 +908,17 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
 
     def log_conversion_config(self):
         """输出转换配置信息到日志窗口"""
+        # 源坐标系描述
+        if self.src_manual_radio.isChecked():
+            src_crs_desc = f"手动指定: {self.src_combo.currentText()}"
+        else:
+            src_crs_desc = "自动识别"
+        # 目标坐标系描述
+        if self.tgt_manual_radio.isChecked():
+            tgt_crs_desc = f"手动指定: {self.tgt_combo.currentText()}"
+        else:
+            tgt_crs_desc = "自动（不转换，保留各自源坐标系）"
+
         config_lines = [
             "=" * 60,
             "📋 转换配置信息",
@@ -706,28 +926,22 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             f"📁 输出目录: {self.output_dir}",
         ]
         if self.selected_input_dir:
-            # 文件夹模式
             config_lines.append(f"📂 工程文件夹（批量模式）: {self.selected_input_dir}")
             config_lines.append("   (MPJ文件数量将在扫描后显示，输出保留目录结构)")
         else:
-            # 文件模式
             config_lines.append(f"📄 待转换文件数: {len(self.selected_files)}")
             config_lines.append("📄 待转换文件列表:")
             for i, file_path in enumerate(self.selected_files, 1):
                 config_lines.append(f"   {i}. {os.path.basename(file_path)}")
         config_lines.extend([
-            f"🔧 比例尺设置: {'启用' if self.scale_checkbox.isChecked() else '禁用'}",
-            f"🌍 投影坐标系设置: {'启用' if self.proj_checkbox.isChecked() else '禁用'}",
+            f"🔧 比例尺设置: {'启用 (' + self.scale_box.text() + ')' if self.scale_checkbox.isChecked() else '禁用'}",
+            f"🌐 源坐标系: {src_crs_desc}",
+            f"🎯 目标坐标系: {tgt_crs_desc}",
             f"📝 文件命名方式: {'直接替换后缀' if self.naming_checkbox.isChecked() else '保持原命名方式'}",
             "=" * 60,
             "🚀 开始转换...",
             "=" * 60
         ])
-        if self.scale_checkbox.isChecked():
-            config_lines.insert(-3, f"   比例尺值: {self.scale_box.text()}")
-        if self.proj_checkbox.isChecked():
-            config_lines.insert(-3, f"   坐标系: {self.projection_combo.text()}")
-        # 统一通过日志信号输出，避免子线程直接操作UI
         for line in config_lines:
             self.handle_log(line)
 

@@ -83,10 +83,30 @@ _GK_EPSG = {
 class MapGisReader:
     """
     MapGIS 文件读取器，支持点、线、面要素的解析与转换。
+
+    参数
+    ----
+    filepath          : str   — 文件路径
+    scale_factor      : int   — 比例尺（可选）
+    source_wkid       : str/int — 手动指定源坐标系 EPSG（None = 由 auto_detect_source_crs 决定）
+    target_wkid       : str/int — 目标坐标系 EPSG，指定后在 to_file() 前执行 to_crs()（None = 不重投影）
+    auto_detect_source_crs : bool — True 时从文件元数据自动识别源坐标系；
+                                     False 时仅用文件内置 CRS（不覆盖）
+    wkid              : 兼容旧接口，等效于同时设置 source_wkid（已弃用，优先使用 source_wkid）
     """
-    def __init__(self, filepath, scale_factor=None, wkid=None):
+    def __init__(self, filepath, scale_factor=None,
+                 source_wkid=None, target_wkid=None,
+                 auto_detect_source_crs=True,
+                 wkid=None):
         self.element_count = 0
-        self.wkid = wkid
+        # 向后兼容旧 wkid 参数：若调用方仍传 wkid，视为 source_wkid
+        if wkid is not None and source_wkid is None:
+            source_wkid = wkid
+        self.source_wkid = source_wkid
+        self.target_wkid = target_wkid
+        self.auto_detect_source_crs = auto_detect_source_crs
+        # 保留旧属性名以兼容现有调用方（指向 source_wkid）
+        self.wkid = source_wkid
         self.coordinate_scale = scale_factor if scale_factor is not None else None
         self.filepath = filepath
         # 原始元数据（由 _parse_crs 填充，供 _detect_wkid_from_metadata 使用）
@@ -99,9 +119,17 @@ class MapGisReader:
         self.shape_type = self._detect_shape_type()
         self._read_headers()
         self._parse_feature_data()
-        # 当调用方未手动指定 wkid 时，尝试从文件元数据自动匹配 EPSG
-        if self.wkid is None:
+        # 源坐标系：优先手动指定，其次自动检测，最后保留文件内置
+        if self.source_wkid is not None:
+            # 手动指定源坐标系
+            try:
+                from pyproj import CRS as _CRS
+                self.crs = _CRS.from_epsg(self.source_wkid)
+            except Exception:
+                pass  # 保留 _parse_crs 已赋的 crs
+        elif self.auto_detect_source_crs:
             self._apply_auto_detected_crs()
+        # 否则保留 _parse_crs 中解析的文件内置 CRS，不做任何覆盖
         self._build_geodataframe()
 
     def _detect_shape_type(self):
@@ -547,15 +575,15 @@ class MapGisReader:
         # 椭球体未知或比例尺原本为0（已被上面兜底为1）的异常情况
         ellipsoid_unknown = ellipsoid not in ellip_dict
         if ellipsoid_unknown:
-            if ellipsoid == 0 and (self.wkid is None or str(self.wkid) == '0'):
-                # 椭球体类型为0且wkid为空，crs置空，主程序日志会有详细提示
+            if ellipsoid == 0 and (self.source_wkid is None or str(self.source_wkid) == '0'):
+                # 椭球体类型为0且未手动指定源坐标系，crs置空，主程序日志会有详细提示
                 self.crs = ''
                 return
-            # 椭球体未知但有 wkid，让 wkid 分支设置 CRS，此处只清空 crs
+            # 椭球体未知但手动指定了源坐标系，__init__ 会后续覆盖，此处只清空 crs
             self.crs = ''
 
-        # 仅在未指定 wkid 时，依据文件中的 proj_type 解析 CRS
-        if self.wkid is None and not ellipsoid_unknown:
+        # 仅在未手动指定源坐标系时，依据文件中的 proj_type 解析文件内置 CRS
+        if self.source_wkid is None and not ellipsoid_unknown:
             if proj_type == 5:
                 # 高斯-克吕格投影
                 self.file.seek(151)
@@ -573,11 +601,7 @@ class MapGisReader:
                 cl = int(str(cl).split('.')[0][:-4]) + int(str(cl).split('.')[0][-4:-2]) / 60.0 + int(str(cl).split('.')[0][-2:]) / 60.0 / 60
                 self.file.seek(175)
                 self.crs = None
-
-        # wkid 指定时直接写入 EPSG CRS，覆盖文件解析结果
-        if self.wkid is not None:
-            proj = CRS.from_epsg(self.wkid)
-            self.crs = CRS(proj.to_wkt())
+        # 注意：source_wkid 指定时 CRS 覆盖由 __init__ 统一处理，_parse_crs 不再重复
 
     def _detect_wkid_from_metadata(self):
         """根据文件元数据推断 EPSG 代码。
@@ -697,7 +721,7 @@ class MapGisReader:
         """构建 GeoDataFrame。"""
         # 标记是否进行了数据修复
         self._data_repaired = False
-        
+
         try:
             # 标准流程：直接构建GeoDataFrame
             self.geodataframe = gpd.GeoDataFrame(self.data, geometry=self.geom)
@@ -710,24 +734,34 @@ class MapGisReader:
                 print(f"  属性表记录数: {len(self.data)}")
                 print(f"  几何对象数: {len(self.geom)}")
                 print(f"  差异: {abs(len(self.data) - len(self.geom))}")
-                
+
                 # 保守的修复策略：取较小的长度
                 min_length = min(len(self.data), len(self.geom))
                 print(f"  修复策略: 取前{min_length}个有效数据")
-                
+
                 self.data = self.data.iloc[:min_length]
                 self.geom = self.geom[:min_length]
                 self._data_repaired = True
-                
+
                 # 重新构建GeoDataFrame
                 self.geodataframe = gpd.GeoDataFrame(self.data, geometry=self.geom)
                 if self.crs:
                     self.geodataframe.crs = self.crs
-                
+
                 print(f"  修复完成 - 属性表: {len(self.data)}, 几何数据: {len(self.geom)}")
             else:
                 # 其他ValueError直接抛出
                 raise
+
+        # 目标坐标系重投影：若指定了 target_wkid 且源 CRS 已知，则执行 to_crs()
+        if self.target_wkid is not None and self.geodataframe.crs is not None:
+            try:
+                self.geodataframe = self.geodataframe.to_crs(epsg=int(self.target_wkid))
+                # 更新 crs 属性以保持一致
+                self.crs = self.geodataframe.crs
+            except Exception as e:
+                # 重投影失败，标记错误供调用方日志记录，不中断流程
+                self._reprojection_error = str(e)
 
     def to_file(self, filepath, **kwargs):
         """保存为文件。"""
@@ -923,6 +957,63 @@ def get_multipolygons(lines):
         temp = [shapely.geometry.Polygon(i[0], i[1:]) for i in level_0.values()]
         temp.extend(get_multipolygons([lines[i] for i in np.argwhere((relation == 1).sum(1) > 1).flatten()]))
         return temp
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 轻量 CRS 预检查：仅读文件头元数据，不解析几何，用于转换前的坐标系汇总弹窗
+# ──────────────────────────────────────────────────────────────────────────────
+def peek_crs(filepath):
+    """快速读取 MapGIS 文件的 CRS 元数据，不解析几何数据。
+
+    返回 dict：
+      {
+        'proj_type'       : int,          # 0=地理, 5=高斯-克吕格, 2/3=其他投影
+        'ellipsoid'       : int,          # 椭球体代码
+        'central_meridian': float 或 None,
+        'detection'       : dict,         # _detect_wkid_from_metadata 的返回值
+        'error'           : str 或 None,  # 解析异常信息
+      }
+    若文件无法识别类型，'error' 会有相应说明，其他字段为 None。
+    """
+    result = {
+        'proj_type': None, 'ellipsoid': None,
+        'central_meridian': None, 'detection': None, 'error': None,
+    }
+    try:
+        type_dict = {b'WMAP`D22': 'POINT', b'WMAP`D23': 'POLYGON', b'WMAP`D21': 'LINE'}
+        with open(filepath, 'rb') as f:
+            magic = f.read(8)
+            if magic not in type_dict:
+                result['error'] = '无法识别的文件类型'
+                return result
+            f.read(4)  # skip 4 bytes
+            data_start = struct.unpack('1i', f.read(4))[0]
+            f.seek(109)
+            proj_type = ord(f.read(1))
+            ellipsoid  = ord(f.read(1))
+            result['proj_type']  = proj_type
+            result['ellipsoid']  = ellipsoid
+            # 读中央经线（只对 proj_type 5 有意义，但读了也不影响）
+            f.seek(151)
+            try:
+                raw_cl = struct.unpack('1d', f.read(8))[0]
+                cl = (int(str(raw_cl).split('.')[0][:-4])
+                      + int(str(raw_cl).split('.')[0][-4:-2]) / 60.0
+                      + int(str(raw_cl).split('.')[0][-2:]) / 60.0 / 60)
+                result['central_meridian'] = cl if proj_type == 5 else None
+            except Exception:
+                result['central_meridian'] = None
+
+        # 复用已有检测逻辑（临时构造一个空 reader 跑元数据检测）
+        _tmp = object.__new__(MapGisReader)
+        _tmp._raw_proj_type       = proj_type
+        _tmp._raw_ellipsoid       = ellipsoid
+        _tmp._raw_central_meridian = result['central_meridian']
+        result['detection'] = _tmp._detect_wkid_from_metadata()
+    except Exception as e:
+        result['error'] = str(e)
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
