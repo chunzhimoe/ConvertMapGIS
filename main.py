@@ -10,7 +10,7 @@ from PyQt5.QtCore import Qt, QUrl, QThread, pyqtSignal, QCoreApplication
 from PyQt5.QtGui import QDesktopServices, QIcon, QIntValidator
 from PyQt5.QtWidgets import (
     QFrame, QApplication, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, QTextEdit,
-    QLineEdit, QButtonGroup, QRadioButton
+    QLineEdit, QButtonGroup, QRadioButton, QGridLayout, QLabel
 )
 from qfluentwidgets import (
     FluentWindow, SubtitleLabel, FluentIcon as FIF, BodyLabel, PushButton, CheckBox, InfoBar, InfoBarPosition,
@@ -538,7 +538,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         # 比例尺控件布局
         self.scale_widget = QWidget()
         self.scale_layout = QHBoxLayout(self.scale_widget)
-        self.scale_layout.setSpacing(50)
+        self.scale_layout.setSpacing(16)
+        self.scale_layout.setContentsMargins(0, 0, 0, 0)
         self.scale_layout.addWidget(self.scale_checkbox)
         self.scale_layout.addWidget(self.scale_box)
 
@@ -549,8 +550,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.common_coord_systems = COMMON_COORD_SYSTEMS
         list_coordinate_system_names = list(self.common_coord_systems.values())
 
-        # ── 源坐标系设置 ──────────────────────────────────────────────────────
-        # "自动识别"单选 / "手动指定"单选 + 下拉
+        # ── 坐标系设置（源 + 目标合并到一个卡片）────────────────────────────────
+        # 源坐标系
         self.src_auto_radio  = QRadioButton("自动识别")
         self.src_manual_radio = QRadioButton("手动指定")
         self.src_auto_radio.setChecked(True)
@@ -560,21 +561,11 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.src_crs_group.buttonClicked.connect(self._on_src_mode_changed)
 
         self.src_combo = ComboBox()
-        self.src_combo.setFixedWidth(320)
+        self.src_combo.setFixedWidth(200)
         self.src_combo.addItems(list_coordinate_system_names)
         self.src_combo.setEnabled(False)
 
-        self.src_crs_widget = QWidget()
-        src_layout = QHBoxLayout(self.src_crs_widget)
-        src_layout.setSpacing(20)
-        src_layout.setContentsMargins(0, 0, 0, 0)
-        src_layout.addWidget(self.src_auto_radio)
-        src_layout.addWidget(self.src_manual_radio)
-        src_layout.addWidget(self.src_combo)
-        src_layout.addStretch()
-
-        # ── 目标坐标系设置 ────────────────────────────────────────────────────
-        # "自动（不转换）"单选 / "手动指定"单选 + 下拉
+        # 目标坐标系
         self.tgt_auto_radio  = QRadioButton("自动（不转换）")
         self.tgt_manual_radio = QRadioButton("手动指定")
         self.tgt_auto_radio.setChecked(True)
@@ -584,18 +575,33 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.tgt_crs_group.buttonClicked.connect(self._on_tgt_mode_changed)
 
         self.tgt_combo = ComboBox()
-        self.tgt_combo.setFixedWidth(320)
+        self.tgt_combo.setFixedWidth(200)
         self.tgt_combo.addItems(list_coordinate_system_names)
         self.tgt_combo.setEnabled(False)
 
-        self.tgt_crs_widget = QWidget()
-        tgt_layout = QHBoxLayout(self.tgt_crs_widget)
-        tgt_layout.setSpacing(20)
-        tgt_layout.setContentsMargins(0, 0, 0, 0)
-        tgt_layout.addWidget(self.tgt_auto_radio)
-        tgt_layout.addWidget(self.tgt_manual_radio)
-        tgt_layout.addWidget(self.tgt_combo)
-        tgt_layout.addStretch()
+        # 源 + 目标合并为两行网格，放入同一个 widget
+        self.crs_widget = QWidget()
+        crs_grid = QGridLayout(self.crs_widget)
+        crs_grid.setContentsMargins(0, 0, 0, 0)
+        crs_grid.setHorizontalSpacing(12)
+        crs_grid.setVerticalSpacing(6)
+        # 行 0：源坐标系标签 | 自动识别 | 手动指定 | combo
+        src_label = QLabel("源坐标系：")
+        tgt_label = QLabel("目标坐标系：")
+        crs_grid.addWidget(src_label,              0, 0)
+        crs_grid.addWidget(self.src_auto_radio,    0, 1)
+        crs_grid.addWidget(self.src_manual_radio,  0, 2)
+        crs_grid.addWidget(self.src_combo,         0, 3)
+        # 行 1：目标坐标系标签 | 自动 | 手动 | combo
+        crs_grid.addWidget(tgt_label,              1, 0)
+        crs_grid.addWidget(self.tgt_auto_radio,    1, 1)
+        crs_grid.addWidget(self.tgt_manual_radio,  1, 2)
+        crs_grid.addWidget(self.tgt_combo,         1, 3)
+        crs_grid.setColumnStretch(4, 1)  # 末尾伸缩
+
+        # 保留旧引用名以避免后续代码报错（指向合并后的 widget）
+        self.src_crs_widget = self.crs_widget
+        self.tgt_crs_widget = self.crs_widget
 
         # 文件命名方式单选框
         self.naming_checkbox = CheckBox('直接替换后缀', self)
@@ -613,9 +619,9 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         # 转换控件布局
         self.convert_widget = QWidget()
         self.convert_layout = QHBoxLayout(self.convert_widget)
-        self.convert_layout.setContentsMargins(20, 0, 0, 0)  # 左侧留出20px间距
-        self.convert_layout.setSpacing(20)  # 增加组件间距
-        self.convert_layout.addWidget(self.save_log_checkbox)  # 新增：保存日志勾选框
+        self.convert_layout.setContentsMargins(0, 0, 0, 0)
+        self.convert_layout.setSpacing(16)
+        self.convert_layout.addWidget(self.save_log_checkbox)
         self.convert_layout.addWidget(self.naming_checkbox)
         self.convert_layout.addWidget(self.convert_button)
         self.convert_layout.addStretch()
@@ -623,10 +629,9 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         # 卡片分组（资源路径替换）
         self.file_group = self.addGroup(get_resource_path("resource/文件.svg"), "选择Mapgis文件", "选择文件或工程文件夹（批量）", self.file_select_widget)
         self.folder_group = self.addGroup(get_resource_path("resource/文件夹.svg"), "选择输出文件夹", "选择转换后的文件输出路径", self.folder_button)
-        self.addGroup(get_resource_path("resource/比例尺.png"), "指定比例尺 ", "设置指定转换的比例尺", self.scale_widget)
-        self.src_crs_card = self.addGroup(get_resource_path("resource/坐标系.png"), "源坐标系", "自动识别每个文件的源坐标系，或手动统一指定", self.src_crs_widget)
-        self.tgt_crs_card = self.addGroup(get_resource_path("resource/坐标系.png"), "目标坐标系", '统一转换到指定坐标系；"自动"表示保留各自源坐标系不重投影', self.tgt_crs_widget)
-        self.convert_group = self.addGroup(get_resource_path("resource/开始.png"), "执行mapgis文件转换", "转换进度", self.convert_widget)
+        self.addGroup(get_resource_path("resource/比例尺.png"), "指定比例尺", "设置转换比例尺", self.scale_widget)
+        self.crs_card = self.addGroup(get_resource_path("resource/坐标系.png"), "坐标系设置", "源坐标系自动识别或手动指定；目标坐标系不转换或重投影", self.crs_widget)
+        self.convert_group = self.addGroup(get_resource_path("resource/开始.png"), "执行转换", "转换进度", self.convert_widget)
 
     def choose_files(self):
         """选择Mapgis文件（单文件模式，清除文件夹模式）"""
