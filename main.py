@@ -22,7 +22,7 @@ from qfluentwidgets import (
 import pymapgis
 
 # ========== 新增：版本号 ==========
-VERSION = "v1.0.4"
+VERSION = "v1.0.10"
 
 # ========== 常用坐标系字典（模块级，供转换配置和坐标计算器共享） ==========
 COMMON_COORD_SYSTEMS = {
@@ -544,7 +544,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
 
         # 比例尺输入框
         self.scale_box = EditableComboBox()
-        self.scale_box.setFixedWidth(100)
+        self.scale_box.setMinimumWidth(80)
+        self.scale_box.setMaximumWidth(120)
         self.scale_box.setEnabled(False)
         self.scale_box.setValidator(QIntValidator())
         self.scale_box.addItems(['200000', '100000', '50000', '10000', '5000', '2000'])
@@ -561,15 +562,17 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.scale_layout.addWidget(self.scale_checkbox)
         self.scale_layout.addWidget(self.scale_box)
 
-        self.file_button.setFixedWidth(120)
-        self.input_dir_button.setFixedWidth(130)
+        self.file_button.setMinimumWidth(100)
+        self.input_dir_button.setMinimumWidth(110)
 
         # slib 符号库文件夹选择
         self.slib_button = PushButton(text="选择 slib 文件夹")
-        self.slib_button.setFixedWidth(160)
+        self.slib_button.setMinimumWidth(140)
+        self.slib_button.setMaximumWidth(200)
         self.slib_button.clicked.connect(self.choose_slib_folder)
         self.slib_clear_button = PushButton(text="清除")
-        self.slib_clear_button.setFixedWidth(60)
+        self.slib_clear_button.setMinimumWidth(54)
+        self.slib_clear_button.setMaximumWidth(80)
         self.slib_clear_button.clicked.connect(self.clear_slib_folder)
         self.slib_widget = QWidget()
         self.slib_layout = QHBoxLayout(self.slib_widget)
@@ -594,7 +597,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.src_crs_group.buttonClicked.connect(self._on_src_mode_changed)
 
         self.src_combo = ComboBox()
-        self.src_combo.setFixedWidth(200)
+        self.src_combo.setMinimumWidth(160)
+        self.src_combo.setMaximumWidth(300)
         self.src_combo.addItems(list_coordinate_system_names)
         self.src_combo.setEnabled(False)
 
@@ -608,7 +612,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.tgt_crs_group.buttonClicked.connect(self._on_tgt_mode_changed)
 
         self.tgt_combo = ComboBox()
-        self.tgt_combo.setFixedWidth(200)
+        self.tgt_combo.setMinimumWidth(160)
+        self.tgt_combo.setMaximumWidth(300)
         self.tgt_combo.addItems(list_coordinate_system_names)
         self.tgt_combo.setEnabled(False)
 
@@ -630,7 +635,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         crs_grid.addWidget(self.tgt_auto_radio,    1, 1)
         crs_grid.addWidget(self.tgt_manual_radio,  1, 2)
         crs_grid.addWidget(self.tgt_combo,         1, 3)
-        crs_grid.setColumnStretch(4, 1)  # 末尾伸缩
+        crs_grid.setColumnStretch(3, 1)  # combo 列随窗口拉伸
+        crs_grid.setColumnStretch(4, 0)  # 无额外空白列
 
         # 保留旧引用名以避免后续代码报错（指向合并后的 widget）
         self.src_crs_widget = self.crs_widget
@@ -801,7 +807,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         """扫描所有待转换图层的 CRS 元数据并显示汇总对话框。
         返回 True 表示用户确认继续，False 表示取消。
         """
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox, QLabel
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QLabel
 
         all_paths = self._collect_all_layer_paths()
         if not all_paths:
@@ -864,27 +870,96 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             lines.append("")
 
         # 始终弹对话框，让用户确认
-        # 弹对话框
+        from PyQt5.QtWidgets import QHBoxLayout as _QHBoxLayout, QPushButton as _QPushButton
         dlg = QDialog(self)
         dlg.setWindowTitle("转换前坐标系预检查")
-        dlg.setMinimumWidth(520)
+        dlg.setMinimumWidth(560)
+        dlg.setMinimumHeight(420)
+
+        # 固定浅色样式，保证对比度
+        dlg.setStyleSheet("""
+            QDialog {
+                background-color: #ffffff;
+            }
+            QLabel#crs_hint_label {
+                color: #1a1a1a;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 4px 0 8px 0;
+            }
+            QTextEdit {
+                background-color: #f5f6fa;
+                color: #1a1a1a;
+                border: 1px solid #d0d3db;
+                border-radius: 6px;
+                padding: 10px;
+                font-family: 'Consolas', 'Microsoft YaHei UI', 'Courier New', monospace;
+                font-size: 10pt;
+                line-height: 1.5;
+            }
+            QPushButton#crs_cancel_btn {
+                background-color: #e8e8e8;
+                color: #333333;
+                border: 1px solid #c0c0c0;
+                border-radius: 5px;
+                padding: 7px 20px;
+                font-size: 13px;
+                min-width: 80px;
+            }
+            QPushButton#crs_cancel_btn:hover {
+                background-color: #d0d0d0;
+            }
+            QPushButton#crs_cancel_btn:pressed {
+                background-color: #b8b8b8;
+            }
+            QPushButton#crs_ok_btn {
+                background-color: #0078d4;
+                color: #ffffff;
+                border: none;
+                border-radius: 5px;
+                padding: 7px 20px;
+                font-size: 13px;
+                font-weight: 600;
+                min-width: 90px;
+            }
+            QPushButton#crs_ok_btn:hover {
+                background-color: #005a9e;
+            }
+            QPushButton#crs_ok_btn:pressed {
+                background-color: #004578;
+            }
+        """)
+
         layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
 
         label = QLabel("请确认以下坐标系检测结果后再继续转换：")
+        label.setObjectName("crs_hint_label")
         layout.addWidget(label)
 
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
         text_edit.setPlainText('\n'.join(lines))
-        text_edit.setFixedHeight(280)
         layout.addWidget(text_edit)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.button(QDialogButtonBox.Ok).setText("继续转换")
-        btn_box.button(QDialogButtonBox.Cancel).setText("取消")
-        btn_box.accepted.connect(dlg.accept)
-        btn_box.rejected.connect(dlg.reject)
-        layout.addWidget(btn_box)
+        # 底部按钮行
+        btn_layout = _QHBoxLayout()
+        btn_layout.setSpacing(10)
+        btn_layout.addStretch()
+
+        cancel_btn = _QPushButton("取消")
+        cancel_btn.setObjectName("crs_cancel_btn")
+        cancel_btn.clicked.connect(dlg.reject)
+
+        ok_btn = _QPushButton("继续转换")
+        ok_btn.setObjectName("crs_ok_btn")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(dlg.accept)
+
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
 
         return dlg.exec_() == QDialog.Accepted
 
@@ -1154,6 +1229,7 @@ class AboutWidget(SingleDirectionScrollArea):
         # 设置滚动区域
         self.setWidget(self.contentWidget)
         self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.enableTransparentBackground()
     
     def setup_project_info(self):
@@ -1185,20 +1261,21 @@ class AboutWidget(SingleDirectionScrollArea):
         project_layout.addWidget(desc_label)
         
         # 项目链接
-        link_layout = QHBoxLayout()
-        link_layout.setSpacing(12)
+        link_layout = QVBoxLayout()
+        link_layout.setSpacing(8)
         
         github_btn = PushButton("GitHub 项目地址", self)
         github_btn.setIcon(FIF.GITHUB)
+        github_btn.setMaximumWidth(300)
         github_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/BenChao1998/ConvertMapGIS")))
         
         releases_btn = PushButton("下载最新版本", self)
         releases_btn.setIcon(FIF.DOWNLOAD)
+        releases_btn.setMaximumWidth(300)
         releases_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/BenChao1998/ConvertMapGIS/releases")))
         
         link_layout.addWidget(github_btn)
         link_layout.addWidget(releases_btn)
-        link_layout.addStretch()
         
         project_layout.addLayout(link_layout)
         self.projectCard.viewLayout.addLayout(project_layout)
@@ -1267,15 +1344,15 @@ class AboutWidget(SingleDirectionScrollArea):
         author_layout.addWidget(author_label)
         
         # 作者链接
-        author_links_layout = QHBoxLayout()
-        author_links_layout.setSpacing(12)
+        author_links_layout = QVBoxLayout()
+        author_links_layout.setSpacing(8)
         
         github_profile_btn = PushButton("GitHub 主页", self)
         github_profile_btn.setIcon(FIF.GITHUB)
+        github_profile_btn.setMaximumWidth(300)
         github_profile_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/BenChao1998")))
         
         author_links_layout.addWidget(github_profile_btn)
-        author_links_layout.addStretch()
         
         author_layout.addLayout(author_links_layout)
         self.authorCard.viewLayout.addLayout(author_layout)
@@ -1329,20 +1406,21 @@ class AboutWidget(SingleDirectionScrollArea):
         thanks_layout.addWidget(thanks_label)
         
         # 项目链接按钮
-        links_layout = QHBoxLayout()
-        links_layout.setSpacing(12)
+        links_layout = QVBoxLayout()
+        links_layout.setSpacing(8)
         
         pymapgis_btn = PushButton("pymapgis 项目", self)
         pymapgis_btn.setIcon(FIF.LINK)
+        pymapgis_btn.setMaximumWidth(300)
         pymapgis_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/leecugb/pymapgis")))
         
         fluent_btn = PushButton("PyQt-Fluent-Widgets", self)
         fluent_btn.setIcon(FIF.LINK)
+        fluent_btn.setMaximumWidth(300)
         fluent_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/zhiyiYo/PyQt-Fluent-Widgets")))
         
         links_layout.addWidget(pymapgis_btn)
         links_layout.addWidget(fluent_btn)
-        links_layout.addStretch()
         
         thanks_layout.addLayout(links_layout)
         self.thanksCard.viewLayout.addLayout(thanks_layout)
@@ -1378,6 +1456,7 @@ class CRSCalculatorWidget(SingleDirectionScrollArea):
 
         self.setWidget(self.contentWidget)
         self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.enableTransparentBackground()
 
     # ──────────────────────────────────────────────────────────────
@@ -1385,41 +1464,49 @@ class CRSCalculatorWidget(SingleDirectionScrollArea):
     # ──────────────────────────────────────────────────────────────
     def _build_transform_section(self):
         layout = QVBoxLayout()
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         crs_names = list(COMMON_COORD_SYSTEMS.values())
 
-        # 源坐标系 + X/Y
-        src_row = QHBoxLayout()
-        src_row.addWidget(BodyLabel("源坐标系："))
+        # ── 第一行：源坐标系 ────────────────────────────────────────
+        src_crs_row = QHBoxLayout()
+        src_crs_row.addWidget(BodyLabel("源坐标系："))
         self.src_combo = ComboBox()
         self.src_combo.addItems(crs_names)
-        self.src_combo.setFixedWidth(280)
-        src_row.addWidget(self.src_combo)
-        src_row.addSpacing(20)
-        src_row.addWidget(BodyLabel("X (经度/东坐标)："))
+        self.src_combo.setMinimumWidth(200)
+        self.src_combo.setMaximumWidth(400)
+        src_crs_row.addWidget(self.src_combo, 1)
+        src_crs_row.addStretch()
+        layout.addLayout(src_crs_row)
+
+        # ── 第二行：X / Y 输入 ─────────────────────────────────────
+        xy_row = QHBoxLayout()
+        xy_row.addWidget(BodyLabel("X (经度/东坐标)："))
         self.x_input = LineEdit()
         self.x_input.setPlaceholderText("例如 108.5 或 500000")
-        self.x_input.setFixedWidth(160)
-        src_row.addWidget(self.x_input)
-        src_row.addSpacing(10)
-        src_row.addWidget(BodyLabel("Y (纬度/北坐标)："))
+        self.x_input.setMinimumWidth(120)
+        self.x_input.setMaximumWidth(200)
+        xy_row.addWidget(self.x_input, 1)
+        xy_row.addSpacing(16)
+        xy_row.addWidget(BodyLabel("Y (纬度/北坐标)："))
         self.y_input = LineEdit()
         self.y_input.setPlaceholderText("例如 34.5 或 3820000")
-        self.y_input.setFixedWidth(160)
-        src_row.addWidget(self.y_input)
-        src_row.addStretch()
-        layout.addLayout(src_row)
+        self.y_input.setMinimumWidth(120)
+        self.y_input.setMaximumWidth(200)
+        xy_row.addWidget(self.y_input, 1)
+        xy_row.addStretch()
+        layout.addLayout(xy_row)
 
-        # 目标坐标系 + 交换按钮
+        # ── 第三行：目标坐标系 + 交换按钮 ──────────────────────────
         tgt_row = QHBoxLayout()
         tgt_row.addWidget(BodyLabel("目标坐标系："))
         self.tgt_combo = ComboBox()
         self.tgt_combo.addItems(crs_names)
         self.tgt_combo.setCurrentIndex(1)   # 默认 WGS84
-        self.tgt_combo.setFixedWidth(280)
-        tgt_row.addWidget(self.tgt_combo)
-        tgt_row.addSpacing(20)
+        self.tgt_combo.setMinimumWidth(200)
+        self.tgt_combo.setMaximumWidth(400)
+        tgt_row.addWidget(self.tgt_combo, 1)
+        tgt_row.addSpacing(16)
         self.swap_btn = PushButton("交换源/目标坐标系")
         try:
             self.swap_btn.setIcon(FIF.SYNC)
@@ -1430,7 +1517,7 @@ class CRSCalculatorWidget(SingleDirectionScrollArea):
         tgt_row.addStretch()
         layout.addLayout(tgt_row)
 
-        # 转换按钮 + 结果
+        # ── 第四行：转换按钮 ────────────────────────────────────────
         btn_row = QHBoxLayout()
         self.transform_btn = PushButton("执行转换")
         try:
@@ -1442,9 +1529,12 @@ class CRSCalculatorWidget(SingleDirectionScrollArea):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # ── 结果框 ──────────────────────────────────────────────────
         self.transform_result = QTextEdit()
         self.transform_result.setReadOnly(True)
-        self.transform_result.setFixedHeight(80)
+        self.transform_result.setMinimumHeight(60)
+        self.transform_result.setMaximumHeight(120)
+        self.transform_result.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.transform_result.setPlaceholderText("转换结果将显示在此处…")
         layout.addWidget(self.transform_result)
 
@@ -1462,7 +1552,8 @@ class CRSCalculatorWidget(SingleDirectionScrollArea):
         datum_row.addWidget(BodyLabel("基准面："))
         self.datum_combo = ComboBox()
         self.datum_combo.addItems(['Beijing 1954 (北京54)', 'Xian 1980 (西安80)', 'New Beijing (新北京)'])
-        self.datum_combo.setFixedWidth(220)
+        self.datum_combo.setMinimumWidth(180)
+        self.datum_combo.setMaximumWidth(320)
         datum_row.addWidget(self.datum_combo)
         datum_row.addStretch()
         layout.addLayout(datum_row)
@@ -1472,7 +1563,8 @@ class CRSCalculatorWidget(SingleDirectionScrollArea):
         cm_row.addWidget(BodyLabel("中央经线（°）："))
         self.cm_input = LineEdit()
         self.cm_input.setPlaceholderText("例如 108 或 117")
-        self.cm_input.setFixedWidth(120)
+        self.cm_input.setMinimumWidth(100)
+        self.cm_input.setMaximumWidth(180)
         cm_row.addWidget(self.cm_input)
         cm_row.addStretch()
         layout.addLayout(cm_row)
@@ -1508,7 +1600,9 @@ class CRSCalculatorWidget(SingleDirectionScrollArea):
 
         self.epsg_result = QTextEdit()
         self.epsg_result.setReadOnly(True)
-        self.epsg_result.setFixedHeight(100)
+        self.epsg_result.setMinimumHeight(80)
+        self.epsg_result.setMaximumHeight(150)
+        self.epsg_result.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.epsg_result.setPlaceholderText("查询结果将显示在此处…")
         layout.addWidget(self.epsg_result)
 
@@ -1632,6 +1726,7 @@ class HomeInterfaceWidget(SingleDirectionScrollArea):
         self.setWidget(self.view)
         self.setWidgetResizable(True)
         self.setObjectName("appInterface")
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.vBoxLayout.setSpacing(0)
         self.vBoxLayout.setContentsMargins(0, 0, 0, 0)
         self.vBoxLayout.addWidget(self.settingCard, 0, Qt.AlignTop)
@@ -1907,12 +2002,16 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.aboutInterface, FIF.INFO, '软件介绍')
 
     def initWindow(self):
-        self.resize(900, 700)
+        desktop = QApplication.desktop().availableGeometry()
+        sw, sh = desktop.width(), desktop.height()
+        # 按屏幕 80%×80% 初始化，但限定在合理范围内
+        win_w = max(900, min(int(sw * 0.80), 1400))
+        win_h = max(680, min(int(sh * 0.80), 1000))
+        self.resize(win_w, win_h)
+        self.setMinimumSize(820, 600)   # 禁止缩到不可用的尺寸
         self.setWindowIcon(QIcon(get_resource_path('resource/图标.ico')))
         self.setWindowTitle(f'Mapgis转换工具 {VERSION}')
-        desktop = QApplication.desktop().availableGeometry()
-        w, h = desktop.width(), desktop.height()
-        self.move(w // 2 - self.width() // 2, h // 2 - self.height() // 2)
+        self.move(sw // 2 - win_w // 2, sh // 2 - win_h // 2)
 
 
 if __name__ == '__main__':
