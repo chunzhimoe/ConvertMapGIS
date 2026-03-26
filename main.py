@@ -280,7 +280,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
 
         def __init__(self, file_paths, output_dir, scale_text, use_scale,
                      auto_detect_source_crs, source_wkid, target_wkid,
-                     get_key_by_value_func, use_simple_naming, input_dir=None, parent=None):
+                     get_key_by_value_func, use_simple_naming, input_dir=None,
+                     slib_dir=None, parent=None):
             super().__init__(parent)
             self.file_paths = file_paths      # list of individual files (file mode), or list of MPJ paths (folder mode)
             self.output_dir = output_dir
@@ -292,6 +293,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             self.get_key_by_value_func = get_key_by_value_func
             self.use_simple_naming = use_simple_naming
             self.input_dir = input_dir        # 文件夹模式的输入根目录（None = 文件模式）
+            self.slib_dir = slib_dir          # slib 符号库目录（None = 不启用）
 
         def run(self):
             """执行文件批量转换，支持比例尺和投影坐标系可选，支持MPJ工程文件展开，支持文件夹批量模式"""
@@ -360,6 +362,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                         kwargs['source_wkid'] = self.source_wkid
                     if self.target_wkid is not None:
                         kwargs['target_wkid'] = self.target_wkid
+                    if self.slib_dir is not None:
+                        kwargs['slib_dir'] = self.slib_dir
                     reader = pymapgis.MapGisReader(mapgis_file, **kwargs)
                     file_base = os.path.splitext(os.path.basename(mapgis_file))[0]
                     file_ext = os.path.splitext(mapgis_file)[1][1:].upper()
@@ -453,6 +457,19 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                     # 保存文件
                     reader.to_file(new_file_path)
 
+                    # slib 附加信息日志
+                    if self.slib_dir is not None:
+                        slib_ok = getattr(reader, '_slib_ok', False)
+                        slib_json = os.path.splitext(new_file_path)[0] + '.slib.json'
+                        if slib_ok:
+                            self.log_signal.emit(
+                                f"📚 slib 符号库已应用 | JSON: {os.path.basename(slib_json)}"
+                            )
+                        else:
+                            self.log_signal.emit(
+                                f"⚠️ slib 符号库未能应用（请检查目录结构或文件类型）"
+                            )
+
                     end_time = time.time()
                     elapsed_time = end_time - start_time
                     self.log_signal.emit(
@@ -501,6 +518,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.output_dir = None
         self.selected_files = None
         self.selected_input_dir = None  # 批量文件夹模式：输入根目录
+        self.slib_dir = None            # slib 符号库目录（None = 不启用）
         self.state_tooltip = None
         self.setTitle("转换配置")
         self.setBorderRadius(8)
@@ -545,6 +563,21 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
 
         self.file_button.setFixedWidth(120)
         self.input_dir_button.setFixedWidth(130)
+
+        # slib 符号库文件夹选择
+        self.slib_button = PushButton(text="选择 slib 文件夹")
+        self.slib_button.setFixedWidth(160)
+        self.slib_button.clicked.connect(self.choose_slib_folder)
+        self.slib_clear_button = PushButton(text="清除")
+        self.slib_clear_button.setFixedWidth(60)
+        self.slib_clear_button.clicked.connect(self.clear_slib_folder)
+        self.slib_widget = QWidget()
+        self.slib_layout = QHBoxLayout(self.slib_widget)
+        self.slib_layout.setContentsMargins(0, 0, 0, 0)
+        self.slib_layout.setSpacing(10)
+        self.slib_layout.addWidget(self.slib_button)
+        self.slib_layout.addWidget(self.slib_clear_button)
+        self.slib_layout.addStretch()
 
         # 常用坐标系字典（引用模块级常量）
         self.common_coord_systems = COMMON_COORD_SYSTEMS
@@ -630,6 +663,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.file_group = self.addGroup(get_resource_path("resource/文件.svg"), "选择Mapgis文件", "选择文件或工程文件夹（批量）", self.file_select_widget)
         self.folder_group = self.addGroup(get_resource_path("resource/文件夹.svg"), "选择输出文件夹", "选择转换后的文件输出路径", self.folder_button)
         self.addGroup(get_resource_path("resource/比例尺.png"), "指定比例尺", "设置转换比例尺", self.scale_widget)
+        self.slib_group = self.addGroup(get_resource_path("resource/文件夹.svg"), "slib 符号库（可选）", "选择 slib 文件夹以导出符号信息；不选择则维持原有输出", self.slib_widget)
         self.crs_card = self.addGroup(get_resource_path("resource/坐标系.png"), "坐标系设置", "源坐标系自动识别或手动指定；目标坐标系不转换或重投影", self.crs_widget)
         self.convert_group = self.addGroup(get_resource_path("resource/开始.png"), "执行转换", "转换进度", self.convert_widget)
 
@@ -681,6 +715,33 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.output_dir = QFileDialog.getExistingDirectory(self, "选择文件夹", "", options=options)
         if self.output_dir:
             self.folder_group.setContent("已选择输出文件夹")
+
+    def choose_slib_folder(self):
+        """选择 slib 符号库文件夹（可选），含 Subgraph.lib / LINESTY.lib / Fillgrph.lib"""
+        options = QFileDialog.Options()
+        folder = QFileDialog.getExistingDirectory(self, "选择 slib 符号库文件夹", "", options=options)
+        if not folder:
+            return
+        # 检查目录是否含有至少一个 lib 文件
+        libs = [f for f in os.listdir(folder) if f.lower().endswith('.lib')]
+        if not libs:
+            InfoBar.warning(
+                title='未找到符号库文件',
+                content="所选文件夹中未找到 .lib 文件，请确认是否为正确的 slib 目录",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self
+            )
+            return
+        self.slib_dir = folder
+        self.slib_group.setContent(f"已选择：{os.path.basename(folder)}（含 {len(libs)} 个 .lib 文件）")
+
+    def clear_slib_folder(self):
+        """清除 slib 符号库目录选择"""
+        self.slib_dir = None
+        self.slib_group.setContent("未选择（不启用符号库）")
 
     def toggle_scale_box(self):
         """切换比例尺输入框可用状态"""
@@ -901,7 +962,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             target_wkid,
             self.get_key_by_value,
             self.naming_checkbox.isChecked(),
-            input_dir=input_dir_arg
+            input_dir=input_dir_arg,
+            slib_dir=self.slib_dir
         )
         self.convert_thread.log_signal.connect(self.handle_log)
         self.convert_thread.finished_signal.connect(self.handle_convert_finished)
@@ -939,6 +1001,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             f"🔧 比例尺设置: {'启用 (' + self.scale_box.text() + ')' if self.scale_checkbox.isChecked() else '禁用'}",
             f"🌐 源坐标系: {src_crs_desc}",
             f"🎯 目标坐标系: {tgt_crs_desc}",
+            f"📚 slib 符号库: {self.slib_dir if self.slib_dir else '未启用'}",
             f"📝 文件命名方式: {'直接替换后缀' if self.naming_checkbox.isChecked() else '保持原命名方式'}",
             "=" * 60,
             "🚀 开始转换...",

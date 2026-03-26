@@ -97,7 +97,7 @@ class MapGisReader:
     def __init__(self, filepath, scale_factor=None,
                  source_wkid=None, target_wkid=None,
                  auto_detect_source_crs=True,
-                 wkid=None):
+                 wkid=None, slib_dir=None):
         self.element_count = 0
         # 向后兼容旧 wkid 参数：若调用方仍传 wkid，视为 source_wkid
         if wkid is not None and source_wkid is None:
@@ -115,6 +115,18 @@ class MapGisReader:
         self._raw_central_meridian = None
         # 自动检测结果（dict，供调用方查询）
         self.crs_detection = None
+        # slib 符号库（可选）
+        self._slib = None
+        self._slib_ok = False
+        self._slib_json_data = None  # 每行的完整符号信息，用于 JSON sidecar
+        if slib_dir is not None:
+            try:
+                import slib_parser
+                self._slib = slib_parser.SlibDirectory(slib_dir)
+                self._slib_ok = self._slib.ok
+            except Exception:
+                self._slib = None
+                self._slib_ok = False
         self.file = open(filepath, 'rb')
         self.shape_type = self._detect_shape_type()
         self._read_headers()
@@ -131,6 +143,9 @@ class MapGisReader:
             self._apply_auto_detected_crs()
         # 否则保留 _parse_crs 中解析的文件内置 CRS，不做任何覆盖
         self._build_geodataframe()
+        # slib 符号信息附加（在 GeoDataFrame 构建后）
+        if self._slib is not None and self._slib_ok:
+            self._apply_slib()
 
     def _detect_shape_type(self):
         """检测文件类型并返回要素类型。"""
@@ -360,7 +375,7 @@ class MapGisReader:
         """解析线要素详细信息（优化版）。"""
         start, vol = struct.unpack('2i', headers[0][:-2])
         n = int(vol / 57) - 1
-        columns = ["ID", "线型", "线颜色", "线宽", "线类型", "X系数", "Y系数", "辅助颜色", "锚点数目", "锚点坐标存储位置"]
+        columns = ["ID", "线型号", "辅助线号", "覆盖方式", "线颜色", "线宽", "线种类", "X系数", "Y系数", "辅助色", "图层", "锚点数目", "锚点坐标存储位置"]
         # 一次性读取所有要素的二进制数据
         self.file.seek(start + 57)  # 跳过第一个
         all_bytes = self.file.read(57 * n)
@@ -372,13 +387,17 @@ class MapGisReader:
                 "ID": i,
                 "锚点数目": struct.unpack('1i', chunk[10:14])[0],
                 "锚点坐标存储位置": struct.unpack('1i', chunk[14:18])[0],
-                "线型": struct.unpack('1i', chunk[22:26])[0],
-                "线颜色": struct.unpack('1i', chunk[26:30])[0],
-                "线宽": struct.unpack('1f', chunk[30:34])[0],
-                "线类型": chunk[34],
-                "X系数": struct.unpack('1f', chunk[35:39])[0],
-                "Y系数": struct.unpack('1f', chunk[39:43])[0],
-                "辅助颜色": struct.unpack('1i', chunk[43:47])[0],
+                # bytes 20-21: 线型号 (short); byte 22: 辅助线号; byte 23: 覆盖方式
+                "线型号": struct.unpack('<h', chunk[20:22])[0],
+                "辅助线号": chunk[22],
+                "覆盖方式": chunk[23],
+                "线颜色": struct.unpack('<i', chunk[24:28])[0],
+                "线宽": struct.unpack('<f', chunk[28:32])[0],
+                "线种类": chunk[32],
+                "X系数": struct.unpack('<f', chunk[33:37])[0],
+                "Y系数": struct.unpack('<f', chunk[37:41])[0],
+                "辅助色": struct.unpack('<i', chunk[41:45])[0],
+                "图层": struct.unpack('<i', chunk[45:49])[0],
             }
             rows.append(row)
             self.element_count += 1
@@ -763,6 +782,111 @@ class MapGisReader:
                 # 重投影失败，标记错误供调用方日志记录，不中断流程
                 self._reprojection_error = str(e)
 
+    def _apply_slib(self):
+        """为 GeoDataFrame 附加 slib 符号库字段，并准备 JSON sidecar 数据。
+
+        Shapefile 附加字段（≤10 字符）：
+          sl_lib    : str  — 'subgraph' / 'linesty' / 'fillgrph'
+          sl_id     : int  — 符号编号（点/面用）
+          sl_type   : int  — 线型号（线要素用）
+          sl_aux    : int  — 辅助线号（线要素用）
+          sl_cov    : int  — 覆盖方式（线要素用）
+          sl_parts  : int  — 图元段数（part_count 或 prim_count）
+          sl_ok     : int  — 1=查找成功, 0=失败
+        """
+        import json as _json
+
+        gdf = self.geodataframe
+        n = len(gdf)
+
+        # 初始化 slib 字段列
+        sl_lib   = [''] * n
+        sl_id    = [0]  * n
+        sl_type  = [0]  * n
+        sl_aux   = [0]  * n
+        sl_cov   = [0]  * n
+        sl_parts = [0]  * n
+        sl_ok    = [0]  * n
+
+        slib_json_rows = []  # 每行完整符号信息（for JSON sidecar）
+
+        if self.shape_type == 'POINT':
+            # 点要素：用「子图号」字段（映射前的原始列名）查 Subgraph.lib
+            # 获取子图号列（可能已被重命名为 SubNo 或仍为 子图号）
+            sym_col = None
+            for cname in ['子图号', 'SubNo']:
+                if cname in gdf.columns:
+                    sym_col = cname
+                    break
+
+            for i in range(n):
+                sym_id = 0
+                if sym_col is not None:
+                    try:
+                        sym_id = int(gdf.iloc[i][sym_col])
+                    except (ValueError, TypeError):
+                        sym_id = 0
+                rec = self._slib.lookup_point(sym_id)
+                ok  = 1 if rec.get('ok') else 0
+                sl_lib[i]   = rec.get('sl_lib', 'subgraph')
+                sl_id[i]    = sym_id
+                sl_parts[i] = rec.get('part_count', 0)
+                sl_ok[i]    = ok
+                slib_json_rows.append(rec)
+
+        elif self.shape_type == 'LINE':
+            # 线要素：用「线型号 / 辅助线号 / 覆盖方式」查 LINESTY.lib
+            for i in range(n):
+                row = gdf.iloc[i]
+                lt  = int(row.get('线型号', row.get('LineType', 0)) or 0)
+                aux = int(row.get('辅助线号', 0) or 0)
+                cov = int(row.get('覆盖方式', 0) or 0)
+                rec = self._slib.lookup_line(lt, aux, cov)
+                ok  = 1 if rec.get('ok') else 0
+                sl_lib[i]   = rec.get('sl_lib', 'linesty')
+                sl_type[i]  = lt
+                sl_aux[i]   = aux
+                sl_cov[i]   = cov
+                sl_parts[i] = rec.get('prim_count', 0)
+                sl_ok[i]    = ok
+                slib_json_rows.append(rec)
+
+        elif self.shape_type == 'POLYGON':
+            # 面要素：用「填充符号」字段查 Fillgrph.lib
+            fill_col = None
+            for cname in ['填充符号', 'FillSymbol']:
+                if cname in gdf.columns:
+                    fill_col = cname
+                    break
+
+            for i in range(n):
+                fill_id = 0
+                if fill_col is not None:
+                    try:
+                        fill_id = int(gdf.iloc[i][fill_col])
+                    except (ValueError, TypeError):
+                        fill_id = 0
+                rec = self._slib.lookup_fill(fill_id)
+                ok  = 1 if rec.get('ok') else 0
+                sl_lib[i]   = rec.get('sl_lib', 'fillgrph')
+                sl_id[i]    = fill_id
+                sl_parts[i] = rec.get('part_count', 0)
+                sl_ok[i]    = ok
+                slib_json_rows.append(rec)
+
+        # 写入 GeoDataFrame
+        gdf['sl_lib']   = sl_lib
+        gdf['sl_id']    = sl_id
+        gdf['sl_type']  = sl_type
+        gdf['sl_aux']   = sl_aux
+        gdf['sl_cov']   = sl_cov
+        gdf['sl_parts'] = sl_parts
+        gdf['sl_ok']    = sl_ok
+        self.geodataframe = gdf
+
+        # 保存 JSON sidecar 数据（to_file 时写出）
+        self._slib_json_data = slib_json_rows
+
     def to_file(self, filepath, **kwargs):
         """保存为文件。"""
         # 通用数值字段异常处理函数，阈值严格按shp字段宽度限制（1e12）
@@ -784,6 +908,20 @@ class MapGisReader:
             self.geodataframe = self._sanitize_field_names(self.geodataframe)
         # 保存文件
         self.geodataframe.to_file(filepath, **kwargs)
+        # 写出 slib JSON sidecar
+        if self._slib_json_data is not None:
+            import json as _json
+            json_path = os.path.splitext(filepath)[0] + '.slib.json'
+            slib_stats = self._slib.stats() if self._slib is not None else {}
+            sidecar = {
+                'source_file': os.path.basename(self.filepath),
+                'shape_type': self.shape_type,
+                'feature_count': len(self._slib_json_data),
+                'slib_stats': slib_stats,
+                'symbols': self._slib_json_data,
+            }
+            with open(json_path, 'w', encoding='utf-8') as f:
+                _json.dump(sidecar, f, ensure_ascii=False, indent=2)
     
     def _sanitize_field_names(self, df):
         """处理字段名，将中文转换为英文。"""
@@ -836,6 +974,21 @@ class MapGisReader:
             'X系数': 'XFact',
             'Y系数': 'YFact',
             '辅助颜色': 'AuxCol',
+            # 新 WL 字段（修正后）
+            '线型号': 'LineNo',
+            '辅助线号': 'AuxLineNo',
+            '覆盖方式': 'CoverMode',
+            '线种类': 'LineKind2',
+            '辅助色': 'AuxCol2',
+            '图层': 'Layer',
+            # slib 附加字段（已是 ASCII ≤10 字符，直接保留）
+            'sl_lib':   'sl_lib',
+            'sl_id':    'sl_id',
+            'sl_type':  'sl_type',
+            'sl_aux':   'sl_aux',
+            'sl_cov':   'sl_cov',
+            'sl_parts': 'sl_parts',
+            'sl_ok':    'sl_ok',
         }
         
         new_columns = []
