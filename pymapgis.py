@@ -78,6 +78,37 @@ _GK_EPSG = {
     },
 }
 
+
+def _safe_decode_bytes(raw, encodings=('gb18030', 'gbk')):
+    """尽量稳健地解码 MapGIS 字节串，遇到坏字节时不抛异常。"""
+    if raw is None:
+        return ''
+
+    raw = bytes(raw)
+    raw = raw.split(b'\x00', 1)[0]
+    if not raw:
+        return ''
+
+    for encoding in encodings:
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError as err:
+            m = re.search(r'in position (\d+)', str(err))
+            if m:
+                prefix = raw[:int(m.group(1))]
+                if prefix:
+                    try:
+                        return prefix.decode(encoding)
+                    except UnicodeDecodeError:
+                        pass
+
+    for encoding in encodings:
+        text = raw.decode(encoding, errors='ignore')
+        if text:
+            return text
+
+    return raw.decode(encodings[0], errors='replace')
+
 # CGCS2000：ellipsoid 字段在文件里实际值尚未确认，暂不加入自动检测
 # 若确认字段值后，可按相同结构添加：
 # 6度带 CM 系列：4502-4512；3度带 CM 系列：4534-4554
@@ -345,10 +376,7 @@ class MapGisReader:
         field_names, field_types, field_offsets, field_lengths = [], [], [], []
         for _ in range(field_count):
             raw = self.file.read(20)
-            try:
-                name = raw.decode('gbk').strip('\x00')
-            except UnicodeDecodeError as err:
-                name = raw[:int(re.search(r'in position (\d+)', str(err)).group(1))].decode('gbk')
+            name = _safe_decode_bytes(raw)
             field_names.append(name)
             field_types.append(ord(self.file.read(1)))
             field_offsets.append(struct.unpack('1i', self.file.read(4))[0])
@@ -400,14 +428,7 @@ class MapGisReader:
                     temp = value
                     attr.append(datetime.time(temp[0], temp[1], *self._parse_time_fraction(struct.unpack('1d', temp[2:])[0])))
                 elif t == 0:
-                    try:
-                        attr.append(value.decode('gbk').strip('\x00'))
-                    except UnicodeDecodeError as err:
-                        m = re.search(r'in position (\\d+)', str(err))
-                        if m:
-                            attr.append(value[:int(m.group(1))].decode('gbk'))
-                        else:
-                            attr.append(value.decode('gbk', errors='replace').strip('\x00'))
+                    attr.append(_safe_decode_bytes(value))
             data.append(attr)
         self.data = pd.DataFrame(data, columns=field_names)
         # 合并更多信息
@@ -490,7 +511,7 @@ class MapGisReader:
                 char_start, _ = struct.unpack('2i', headers[1][:-2])
                 self.file.seek(char_start + char_offset)
                 char_text = self.file.read(str_count)
-                df.loc[i, '字符串'] = char_text.decode('gb18030')
+                df.loc[i, '字符串'] = _safe_decode_bytes(char_text)
             elif point_type == 1:
                 df.loc[i, '点类型'] = "子图"
                 df.loc[i, '子图号'] = struct.unpack('1i', self.file.read(4))[0]
@@ -1553,7 +1574,7 @@ class MapGISProjectReader:
         parts = field.split(b'\x00')
         result = []
         for p in parts:
-            s = p.decode('gbk', errors='ignore').strip()
+            s = _safe_decode_bytes(p).strip()
             if s:
                 result.append(s)
         return result
