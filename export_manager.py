@@ -27,7 +27,7 @@ Design notes
     ln_<8-char hash>  –  lines / polylines
     pg_<8-char hash>  –  polygons / regions
   The manifest table maps hash → human-readable source filename.
-* System tables written inside the GDB directory:
+* System tables written **next to** the GDB directory (not inside it):
     __layers_manifest.json  –  one row per layer
     __slib_symbols.json     –  full slib symbol detail rows
 """
@@ -339,6 +339,27 @@ def export_to_gdb(
     return fc_path
 
 
+def _downcast_int64_to_int32(gdf, log_fn):
+    """Downcast any int64 columns to int32 for ArcMap compatibility.
+
+    ArcMap 10.x (FileGDB) does not support Big Integer (int64) fields.
+    This is a belt-and-suspenders guard: upstream code should already emit
+    int32, but pandas may infer int64 from Python int lists.
+    """
+    import numpy as np
+
+    renamed = []
+    for col in gdf.columns:
+        if col == gdf.geometry.name:
+            continue
+        if hasattr(gdf[col], 'dtype') and gdf[col].dtype == np.int64:
+            gdf[col] = gdf[col].astype(np.int32)
+            renamed.append(col)
+    if renamed:
+        log_fn(f"ℹ️ 已将 int64 字段降级为 int32（ArcMap 兼容）: {renamed}")
+    return gdf
+
+
 # ---------------------------------------------------------------------------
 # Internal: write feature class
 # ---------------------------------------------------------------------------
@@ -347,13 +368,19 @@ def _write_feature_class(gdf, gdb: str, fc_name: str, shape_type: str, log_fn) -
     """Write *gdf* into *gdb* as feature class *fc_name* via OpenFileGDB driver.
 
     Uses pyogrio (bundled with geopandas in the PyInstaller package).
-    Passes TARGET_ARCGIS_VERSION to suppress Integer64 warnings.
+    TARGET_ARCGIS_VERSION is set to 'ALL' to ensure compatibility with
+    ArcMap 10.x (which does not support Big Integer / int64 fields).
     """
     fc_path = os.path.join(gdb, fc_name)
 
+    # Belt-and-suspenders: downcast any remaining int64 columns to int32
+    gdf = _downcast_int64_to_int32(gdf, log_fn)
+
     # layer_options for pyogrio's OpenFileGDB driver (must be a dict)
+    # Use 'ALL' (not 'ARCGIS_PRO_3_2_OR_LATER') so the GDB remains compatible
+    # with ArcMap 10.x which does not support Big Integer (int64) fields.
     layer_options = {
-        'TARGET_ARCGIS_VERSION': 'ARCGIS_PRO_3_2_OR_LATER',
+        'TARGET_ARCGIS_VERSION': 'ALL',
     }
 
     gdf.to_file(
@@ -372,7 +399,9 @@ def _write_feature_class(gdf, gdb: str, fc_name: str, shape_type: str, log_fn) -
 # ---------------------------------------------------------------------------
 
 def _manifest_path(gdb: str) -> str:
-    return os.path.join(gdb, '__layers_manifest.json')
+    # Place the manifest next to output.gdb (not inside it) to avoid
+    # polluting the FileGDB directory structure.
+    return os.path.join(os.path.dirname(gdb), '__layers_manifest.json')
 
 
 def _update_manifest(gdb: str, ascii_key: str, display_key: str,
@@ -406,7 +435,9 @@ def _update_manifest(gdb: str, ascii_key: str, display_key: str,
 # ---------------------------------------------------------------------------
 
 def _slib_table_path(gdb: str) -> str:
-    return os.path.join(gdb, '__slib_symbols.json')
+    # Place the slib table next to output.gdb (not inside it) to avoid
+    # polluting the FileGDB directory structure.
+    return os.path.join(os.path.dirname(gdb), '__slib_symbols.json')
 
 
 def _update_slib_table(gdb: str, ascii_key: str, slib_rows: list):

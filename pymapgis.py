@@ -790,7 +790,8 @@ class MapGisReader:
         if 'layer_key' not in self.geodataframe.columns:
             self.geodataframe['layer_key'] = ''
         if 'feat_id' not in self.geodataframe.columns:
-            self.geodataframe['feat_id'] = list(range(n))
+            import numpy as np
+            self.geodataframe['feat_id'] = np.arange(n, dtype=np.int32)
 
     def _apply_slib(self):
         """为 GeoDataFrame 附加 slib 符号库字段，并准备 JSON sidecar 数据。
@@ -809,14 +810,15 @@ class MapGisReader:
         gdf = self.geodataframe
         n = len(gdf)
 
-        # 初始化 slib 字段列
+        # 初始化 slib 字段列（显式 int32，避免 pandas 推断为 int64 导致 ArcMap 不兼容）
+        import numpy as np
         sl_lib   = [''] * n
-        sl_id    = [0]  * n
-        sl_type  = [0]  * n
-        sl_aux   = [0]  * n
-        sl_cov   = [0]  * n
-        sl_parts = [0]  * n
-        sl_ok    = [0]  * n
+        sl_id    = np.zeros(n, dtype=np.int32)
+        sl_type  = np.zeros(n, dtype=np.int32)
+        sl_aux   = np.zeros(n, dtype=np.int32)
+        sl_cov   = np.zeros(n, dtype=np.int32)
+        sl_parts = np.zeros(n, dtype=np.int32)
+        sl_ok    = np.zeros(n, dtype=np.int32)
 
         slib_json_rows = []  # 每行完整符号信息（for JSON sidecar）
 
