@@ -22,7 +22,7 @@ from qfluentwidgets import (
 import pymapgis
 
 # ========== 新增：版本号 ==========
-VERSION = "v1.0.10"
+VERSION = "v1.0.11"
 
 # ========== 常用坐标系字典（模块级，供转换配置和坐标计算器共享） ==========
 COMMON_COORD_SYSTEMS = {
@@ -281,7 +281,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         def __init__(self, file_paths, output_dir, scale_text, use_scale,
                      auto_detect_source_crs, source_wkid, target_wkid,
                      get_key_by_value_func, use_simple_naming, input_dir=None,
-                     slib_dir=None, parent=None):
+                     slib_dir=None, export_mode='shp', parent=None):
             super().__init__(parent)
             self.file_paths = file_paths      # list of individual files (file mode), or list of MPJ paths (folder mode)
             self.output_dir = output_dir
@@ -294,6 +294,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             self.use_simple_naming = use_simple_naming
             self.input_dir = input_dir        # 文件夹模式的输入根目录（None = 文件模式）
             self.slib_dir = slib_dir          # slib 符号库目录（None = 不启用）
+            self.export_mode = export_mode    # 'shp' | 'gdb' | 'both'
 
         def run(self):
             """执行文件批量转换，支持比例尺和投影坐标系可选，支持MPJ工程文件展开，支持文件夹批量模式"""
@@ -455,7 +456,24 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                         new_file_path = renamed_path
 
                     # 保存文件
-                    reader.to_file(new_file_path)
+                    if self.export_mode in ('shp', 'both'):
+                        reader.to_file(new_file_path)
+                    if self.export_mode in ('gdb', 'both'):
+                        try:
+                            import export_manager
+                            gdb_path = export_manager.export_to_gdb(
+                                reader=reader,
+                                out_dir=out_dir,
+                                layer_key=os.path.splitext(os.path.basename(mapgis_file))[0],
+                                log_fn=self.log_signal.emit,
+                            )
+                            self.log_signal.emit(f"🗄️ GDB 图层已写入: {gdb_path}")
+                        except Exception as gdb_exc:
+                            import traceback
+                            self.log_signal.emit(
+                                f"❌ GDB 导出失败 | 文件：{os.path.basename(mapgis_file)} | {gdb_exc}\n"
+                                + ''.join(traceback.format_exception(type(gdb_exc), gdb_exc, gdb_exc.__traceback__))
+                            )
 
                     # slib 附加信息日志
                     if self.slib_dir is not None:
@@ -646,6 +664,20 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.naming_checkbox = CheckBox('直接替换后缀', self)
         self.naming_checkbox.setToolTip('勾选后文件名直接替换后缀为shp，不勾选则保持原命名方式')
 
+        # 导出格式选择（SHP / GDB / 两者）
+        self.export_shp_radio  = QRadioButton('SHP', self)
+        self.export_gdb_radio  = QRadioButton('GDB', self)
+        self.export_both_radio = QRadioButton('两者', self)
+        self.export_shp_radio.setChecked(True)
+        self.export_shp_radio.setToolTip('仅导出 Shapefile')
+        self.export_gdb_radio.setToolTip('仅导出 FileGDB（需要 ArcGIS Pro / ArcPy）')
+        self.export_both_radio.setToolTip('同时导出 Shapefile 和 FileGDB')
+        self.export_format_group = QButtonGroup(self)
+        self.export_format_group.addButton(self.export_shp_radio,  0)
+        self.export_format_group.addButton(self.export_gdb_radio,  1)
+        self.export_format_group.addButton(self.export_both_radio, 2)
+        export_fmt_label = QLabel("导出格式：")
+
         # 转换按钮
         self.convert_button = PushButton(text="开始转换")
         self.convert_button.clicked.connect(self.start_conversion)
@@ -662,6 +694,11 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.convert_layout.setSpacing(16)
         self.convert_layout.addWidget(self.save_log_checkbox)
         self.convert_layout.addWidget(self.naming_checkbox)
+        self.convert_layout.addSpacing(8)
+        self.convert_layout.addWidget(export_fmt_label)
+        self.convert_layout.addWidget(self.export_shp_radio)
+        self.convert_layout.addWidget(self.export_gdb_radio)
+        self.convert_layout.addWidget(self.export_both_radio)
         self.convert_layout.addWidget(self.convert_button)
         self.convert_layout.addStretch()
 
@@ -1027,6 +1064,14 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         source_wkid = None if auto_detect_src else self._get_epsg_from_combo(self.src_combo)
         target_wkid = None if self.tgt_auto_radio.isChecked() else self._get_epsg_from_combo(self.tgt_combo)
 
+        # 解析导出格式
+        if self.export_gdb_radio.isChecked():
+            export_mode = 'gdb'
+        elif self.export_both_radio.isChecked():
+            export_mode = 'both'
+        else:
+            export_mode = 'shp'
+
         self.convert_thread = self.ConvertThread(
             file_paths_arg,
             self.output_dir,
@@ -1038,7 +1083,8 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             self.get_key_by_value,
             self.naming_checkbox.isChecked(),
             input_dir=input_dir_arg,
-            slib_dir=self.slib_dir
+            slib_dir=self.slib_dir,
+            export_mode=export_mode
         )
         self.convert_thread.log_signal.connect(self.handle_log)
         self.convert_thread.finished_signal.connect(self.handle_convert_finished)

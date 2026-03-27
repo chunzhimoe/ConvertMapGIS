@@ -782,6 +782,16 @@ class MapGisReader:
                 # 重投影失败，标记错误供调用方日志记录，不中断流程
                 self._reprojection_error = str(e)
 
+        # ── 连接键：layer_key + feat_id ──────────────────────────────────
+        # layer_key: 由调用方（export_manager）通过 set_layer_key() 注入；
+        #            此处先用空字符串占位，保证字段始终存在。
+        # feat_id:   每图层内的顺序整数，可作为稳定连接键。
+        n = len(self.geodataframe)
+        if 'layer_key' not in self.geodataframe.columns:
+            self.geodataframe['layer_key'] = ''
+        if 'feat_id' not in self.geodataframe.columns:
+            self.geodataframe['feat_id'] = list(range(n))
+
     def _apply_slib(self):
         """为 GeoDataFrame 附加 slib 符号库字段，并准备 JSON sidecar 数据。
 
@@ -886,6 +896,11 @@ class MapGisReader:
 
         # 保存 JSON sidecar 数据（to_file 时写出）
         self._slib_json_data = slib_json_rows
+
+    def set_layer_key(self, key: str):
+        """由外部（export_manager）注入图层唯一键，写入 geodataframe['layer_key']。"""
+        if self.geodataframe is not None and 'layer_key' in self.geodataframe.columns:
+            self.geodataframe['layer_key'] = key
 
     def to_file(self, filepath, **kwargs):
         """保存为文件。"""
