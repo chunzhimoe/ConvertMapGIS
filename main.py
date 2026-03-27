@@ -456,10 +456,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                         self.log_signal.emit(
                             f"⚠️ 数据已修复 | 文件：{os.path.basename(mapgis_file)} | 已自动处理属性表与几何数据不匹配问题"
                         )
-                    else:
-                        self.log_signal.emit(
-                            f"🕐 {time.strftime('%H:%M:%S')} | ✅ 转换成功 | 文件：{os.path.basename(mapgis_file)}"
-                        )
+                    # 注：不在这里发"转换成功"，等文件真正写出后在"转换完成"里体现
 
                     # 确保输出子目录存在（文件夹模式）
                     if out_dir != self.output_dir:
@@ -2037,6 +2034,9 @@ class QTextEditLogger:
 
 class MainWindow(FluentWindow):
     """主窗口，包含导航与各功能页面"""
+    # 线程安全的警告信号，任何线程都可以 emit，slot 在主线程执行
+    _warning_signal = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self.homeInterface = HomeInterfaceWidget(self)
@@ -2088,13 +2088,17 @@ class MainWindow(FluentWindow):
             )
         self.initNavigation()
         self.initWindow()
-        # ========== 新增：捕获所有Python警告到日志窗口 ==========
+        # ========== 捕获所有Python警告到日志窗口（线程安全版）==========
+        # _warning_signal 是 Qt 信号，任何线程 emit 后都在主线程 slot 执行，不会崩溃
+        self._warning_signal.connect(
+            lambda msg: self.logInterface.append_log_with_color(msg, color="#FF8C00")
+        )
         def custom_showwarning(message, category, filename, lineno, file=None, line=None):
             warning_msg = warnings.formatwarning(message, category, filename, lineno, line)
-            if hasattr(self, 'logInterface'):
-                self.logInterface.append_log_with_color(warning_msg, color="#FF8C00")
-            else:
-                print(warning_msg)
+            try:
+                self._warning_signal.emit(warning_msg)
+            except Exception:
+                pass  # 极端情况下不能崩溃
         warnings.showwarning = custom_showwarning
     
     def setup_log_colors(self):

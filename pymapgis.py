@@ -392,12 +392,13 @@ class MapGisReader:
                 "辅助线号": chunk[22],
                 "覆盖方式": chunk[23],
                 "线颜色": struct.unpack('<i', chunk[24:28])[0],
-                "线宽": struct.unpack('<f', chunk[28:32])[0],
-                "线种类": chunk[32],
-                "X系数": struct.unpack('<f', chunk[33:37])[0],
-                "Y系数": struct.unpack('<f', chunk[37:41])[0],
-                "辅助色": struct.unpack('<i', chunk[41:45])[0],
-                "图层": struct.unpack('<i', chunk[45:49])[0],
+                # bytes 28-29: 2 unknown bytes (padding/flags), skip
+                "线宽": struct.unpack('<f', chunk[30:34])[0],
+                "线种类": chunk[34],
+                "X系数": struct.unpack('<f', chunk[35:39])[0],
+                "Y系数": struct.unpack('<f', chunk[39:43])[0],
+                "辅助色": struct.unpack('<i', chunk[43:47])[0],
+                "图层": struct.unpack('<i', chunk[47:51])[0],
             }
             rows.append(row)
             self.element_count += 1
@@ -920,6 +921,14 @@ class MapGisReader:
         numeric_columns = self.geodataframe.select_dtypes(include=['float64', 'float32', 'int64', 'int32']).columns
         for col in numeric_columns:
             fix_large_values(self.geodataframe, col, threshold=1e12)
+        # 对线宽字段做额外的合理值校验（应为正小数，单位mm；异常值置0）
+        for linewid_col in ['线宽', 'LineWid']:
+            if linewid_col in self.geodataframe.columns:
+                col = self.geodataframe[linewid_col]
+                bad = (col < 0) | (col > 10000) | col.isnull()
+                if bad.any():
+                    print(f"检测到{bad.sum()}个{linewid_col}值异常（负值/超大值），已自动置0")
+                    self.geodataframe.loc[bad, linewid_col] = 0.0
         # 处理字段名（转换为英文，避免pyogrio警告）
         if filepath.split('.')[-1] == 'shp':
             self.geodataframe = self._sanitize_field_names(self.geodataframe)
