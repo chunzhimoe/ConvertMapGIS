@@ -1,13 +1,16 @@
 import datetime
+import glob
 import os
 import re
 import struct
+from collections import Counter
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pypinyin
 import shapely
+from shapely import affinity as shapely_affinity
 from pyproj import CRS
 
 
@@ -107,12 +110,18 @@ class MapGisReader:
         self.auto_detect_source_crs = auto_detect_source_crs
         # 保留旧属性名以兼容现有调用方（指向 source_wkid）
         self.wkid = source_wkid
+        self._user_provided_scale = scale_factor is not None
         self.coordinate_scale = scale_factor if scale_factor is not None else None
         self.filepath = filepath
         # 原始元数据（由 _parse_crs 填充，供 _detect_wkid_from_metadata 使用）
         self._raw_proj_type = None
         self._raw_ellipsoid = None
         self._raw_central_meridian = None
+        self._raw_scale_factor = None
+        self._raw_bbox = None
+        self._metadata_crs_suspect = False
+        self._inferred_source_epsg = None
+        self._spatial_context_note = ''
         # 自动检测结果（dict，供调用方查询）
         self.crs_detection = None
         # slib 符号库（可选）
@@ -131,6 +140,7 @@ class MapGisReader:
         self.shape_type = self._detect_shape_type()
         self._read_headers()
         self._parse_feature_data()
+        self._normalise_spatial_context()
         # 源坐标系：优先手动指定，其次自动检测，最后保留文件内置
         if self.source_wkid is not None:
             # 手动指定源坐标系
@@ -176,6 +186,144 @@ class MapGisReader:
             start, _ = struct.unpack('2i', self.headers[9][:-2])
             self._parse_attributes(start)
             self._parse_polygons()
+
+    def _compute_raw_bbox(self):
+        """基于未缩放的原始坐标计算包围盒。"""
+        if not hasattr(self, 'coords') or self.coords is None:
+            return None
+
+        if self.shape_type == 'POINT':
+            arr = np.asarray(self.coords, dtype=float)
+            if arr.size == 0:
+                return None
+            return (
+                float(arr[:, 0].min()),
+                float(arr[:, 1].min()),
+                float(arr[:, 0].max()),
+                float(arr[:, 1].max()),
+            )
+
+        xs = []
+        ys = []
+        for part in self.coords:
+            arr = np.asarray(part, dtype=float)
+            if arr.size == 0:
+                continue
+            arr = arr.reshape(-1, 2)
+            xs.extend(arr[:, 0].tolist())
+            ys.extend(arr[:, 1].tolist())
+
+        if not xs:
+            return None
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def _bbox_looks_geographic(self, bbox):
+        """判断原始坐标包围盒是否像经纬度。"""
+        if bbox is None:
+            return False
+        xmin, ymin, xmax, ymax = bbox
+        return (-180 <= xmin <= 180 and -180 <= xmax <= 180 and
+                -90 <= ymin <= 90 and -90 <= ymax <= 90)
+
+    def _infer_spatial_context_from_siblings(self):
+        """从同目录其他图层推断缩放和源坐标系。"""
+        folder = os.path.dirname(os.path.abspath(self.filepath))
+        sibling_paths = []
+        for pattern in ('*.WP', '*.WL', '*.WT', '*.wp', '*.wl', '*.wt'):
+            sibling_paths.extend(glob.glob(os.path.join(folder, pattern)))
+
+        scale_counts = Counter()
+        epsg_counts = Counter()
+        current_path = os.path.abspath(self.filepath)
+
+        for sibling in sibling_paths:
+            if os.path.abspath(sibling) == current_path:
+                continue
+
+            meta = _read_mapgis_spatial_header(sibling)
+            if meta.get('error'):
+                continue
+
+            proj_type = meta.get('proj_type')
+            raw_scale = meta.get('raw_scale')
+            if proj_type in {2, 3, 5} and isinstance(raw_scale, (int, float)) and raw_scale > 0:
+                scale_counts[round(raw_scale / 1000.0, 6)] += 1
+
+            det = meta.get('detection') or {}
+            epsg = det.get('detected_epsg')
+            if epsg and det.get('confidence') == 'high':
+                epsg_counts[int(epsg)] += 1
+
+        scale_hint = None
+        if scale_counts:
+            scale_value, scale_count = scale_counts.most_common(1)[0]
+            if scale_count >= 2 or len(scale_counts) == 1:
+                scale_hint = float(scale_value)
+
+        epsg_hint = None
+        if epsg_counts:
+            epsg_value, epsg_count = epsg_counts.most_common(1)[0]
+            if epsg_count >= 2 or len(epsg_counts) == 1:
+                epsg_hint = int(epsg_value)
+
+        return scale_hint, epsg_hint
+
+    def _rescale_geometries(self, new_scale):
+        """按新的缩放倍数重建当前几何的坐标尺度。"""
+        if new_scale is None or new_scale <= 0:
+            new_scale = 1.0
+
+        old_scale = self.coordinate_scale if self.coordinate_scale not in (None, 0) else 1.0
+        if abs(float(new_scale) - float(old_scale)) < 1e-12:
+            self.coordinate_scale = float(new_scale)
+            return
+
+        ratio = float(new_scale) / float(old_scale)
+        self.geom = [
+            shapely_affinity.scale(geom, xfact=ratio, yfact=ratio, origin=(0, 0))
+            for geom in self.geom
+        ]
+        self.coordinate_scale = float(new_scale)
+
+    def _normalise_spatial_context(self):
+        """修正明显异常的比例尺/坐标系元数据。"""
+        self._raw_bbox = self._compute_raw_bbox()
+
+        # proj_type==0 但坐标明显不是经纬度：不要再按地理坐标处理
+        if self._raw_proj_type != 0 or self._raw_bbox is None:
+            return
+
+        if self._bbox_looks_geographic(self._raw_bbox):
+            # 真正经纬度坐标不应再乘比例尺
+            self._rescale_geometries(1.0)
+            return
+
+        self._metadata_crs_suspect = True
+        scale_hint, epsg_hint = self._infer_spatial_context_from_siblings()
+        self._inferred_source_epsg = epsg_hint
+
+        if (not self._user_provided_scale and
+                (self._raw_scale_factor is None or self._raw_scale_factor <= 0) and
+                scale_hint is not None):
+            self._rescale_geometries(scale_hint)
+            self._spatial_context_note = (
+                '文件头标注为地理坐标，但原始坐标超出经纬度范围；'
+                f'已按同目录图层推断比例尺 {scale_hint:g}'
+            )
+        else:
+            self._rescale_geometries(self.coordinate_scale if self.coordinate_scale else 1.0)
+            self._spatial_context_note = (
+                '文件头标注为地理坐标，但原始坐标超出经纬度范围；'
+                '已保留原始图幅坐标输出'
+            )
+
+        self.crs = None
+        if epsg_hint is not None:
+            try:
+                self.crs = CRS.from_epsg(epsg_hint)
+                self._spatial_context_note += f'，并按同目录多数图层推断 EPSG:{epsg_hint}'
+            except Exception:
+                self.crs = None
 
     def _parse_attributes(self, start):
         """解析属性表。"""
@@ -566,8 +714,12 @@ class MapGisReader:
         user_provided_scale = self.coordinate_scale is not None
         if user_provided_scale:
             self.file.read(8)  # 跳过文件中的比例尺字段
+            raw_scale = float(self.coordinate_scale)
         else:
-            self.coordinate_scale = struct.unpack('1d', self.file.read(8))[0]
+            raw_scale = struct.unpack('1d', self.file.read(8))[0]
+        self._raw_scale_factor = raw_scale
+        raw_scale_invalid = raw_scale is None or raw_scale <= 0
+        self.coordinate_scale = 1 if raw_scale_invalid else raw_scale
 
         ellip_dict = {
             1: '+ellps=krass +towgs84=15.8,-154.4,-82.3,0,0,0,0 +units=m +no_d',
@@ -585,12 +737,8 @@ class MapGisReader:
         # 地理坐标系（proj_type==0）以度存储，无需换算
         # 此换算与 wkid 是否指定无关，只由源文件的 proj_type 决定
         PROJECTED_TYPES = {2, 3, 5}
-        if proj_type in PROJECTED_TYPES:
-            if self.coordinate_scale == 0:
-                # 比例尺无效时兜底为1，防止后续除法产生 0.001
-                self.coordinate_scale = 1
-            else:
-                self.coordinate_scale = self.coordinate_scale / 1000
+        if proj_type in PROJECTED_TYPES and not raw_scale_invalid:
+            self.coordinate_scale = self.coordinate_scale / 1000
 
         # 椭球体未知或比例尺原本为0（已被上面兜底为1）的异常情况
         ellipsoid_unknown = ellipsoid not in ellip_dict
@@ -728,6 +876,17 @@ class MapGisReader:
         结果写入 self.crs_detection 供调用方（转换线程）读取日志。
         """
         detection = self._detect_wkid_from_metadata()
+
+        if self._metadata_crs_suspect:
+            detection = {
+                'detected_epsg': self._inferred_source_epsg,
+                'confidence': 'high' if self._inferred_source_epsg is not None else 'low',
+                'datum': detection.get('datum', '未知'),
+                'proj_desc': '图幅平面坐标（由坐标范围判定）',
+                'central_meridian': detection.get('central_meridian'),
+                'note': self._spatial_context_note,
+            }
+
         self.crs_detection = detection
 
         if detection['detected_epsg'] and detection['confidence'] == 'high':
@@ -1084,7 +1243,12 @@ class MapGisReader:
         return f"MapGIS文件读取器\n{len(self)} 个要素 (类型: {self.shape_type})"
 
     def __del__(self):
-        self.file.close()
+        file_obj = getattr(self, 'file', None)
+        if file_obj is not None:
+            try:
+                file_obj.close()
+            except Exception:
+                pass
 
     def __enter__(self):
         return self
@@ -1139,26 +1303,17 @@ def get_multipolygons(lines):
 
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 轻量 CRS 预检查：仅读文件头元数据，不解析几何，用于转换前的坐标系汇总弹窗
-# ──────────────────────────────────────────────────────────────────────────────
-def peek_crs(filepath):
-    """快速读取 MapGIS 文件的 CRS 元数据，不解析几何数据。
-
-    返回 dict：
-      {
-        'proj_type'       : int,          # 0=地理, 5=高斯-克吕格, 2/3=其他投影
-        'ellipsoid'       : int,          # 椭球体代码
-        'central_meridian': float 或 None,
-        'detection'       : dict,         # _detect_wkid_from_metadata 的返回值
-        'error'           : str 或 None,  # 解析异常信息
-      }
-    若文件无法识别类型，'error' 会有相应说明，其他字段为 None。
-    """
+def _read_mapgis_spatial_header(filepath):
+    """轻量读取文件头中的空间元数据。"""
     result = {
-        'proj_type': None, 'ellipsoid': None,
-        'central_meridian': None, 'detection': None, 'error': None,
+        'proj_type': None,
+        'ellipsoid': None,
+        'raw_scale': None,
+        'central_meridian': None,
+        'detection': None,
+        'error': None,
     }
+
     try:
         type_dict = {b'WMAP`D22': 'POINT', b'WMAP`D23': 'POLYGON', b'WMAP`D21': 'LINE'}
         with open(filepath, 'rb') as f:
@@ -1166,14 +1321,15 @@ def peek_crs(filepath):
             if magic not in type_dict:
                 result['error'] = '无法识别的文件类型'
                 return result
-            f.read(4)  # skip 4 bytes
-            data_start = struct.unpack('1i', f.read(4))[0]
+            f.read(4)
+            f.read(4)
             f.seek(109)
             proj_type = ord(f.read(1))
-            ellipsoid  = ord(f.read(1))
-            result['proj_type']  = proj_type
-            result['ellipsoid']  = ellipsoid
-            # 读中央经线（只对 proj_type 5 有意义，但读了也不影响）
+            ellipsoid = ord(f.read(1))
+            result['proj_type'] = proj_type
+            result['ellipsoid'] = ellipsoid
+            f.seek(143)
+            result['raw_scale'] = struct.unpack('1d', f.read(8))[0]
             f.seek(151)
             try:
                 raw_cl = struct.unpack('1d', f.read(8))[0]
@@ -1184,15 +1340,36 @@ def peek_crs(filepath):
             except Exception:
                 result['central_meridian'] = None
 
-        # 复用已有检测逻辑（临时构造一个空 reader 跑元数据检测）
         _tmp = object.__new__(MapGisReader)
-        _tmp._raw_proj_type       = proj_type
-        _tmp._raw_ellipsoid       = ellipsoid
+        _tmp._raw_proj_type = proj_type
+        _tmp._raw_ellipsoid = ellipsoid
         _tmp._raw_central_meridian = result['central_meridian']
         result['detection'] = _tmp._detect_wkid_from_metadata()
+
+        # 仅基于文件头预检查时，proj_type=0 且比例尺为0的文件很容易误判为经纬度。
+        # 这类文件在实际转换阶段还会结合真实坐标范围进一步判断，这里先降为低置信。
+        if proj_type == 0 and result['raw_scale'] is not None and result['raw_scale'] <= 0:
+            det = result['detection'] or {}
+            result['detection'] = {
+                'detected_epsg': None,
+                'confidence': 'low',
+                'datum': det.get('datum', '未知'),
+                'proj_desc': '地理坐标系（待核实）',
+                'central_meridian': det.get('central_meridian'),
+                'note': '文件头地理坐标且比例尺为0，可能为图幅局部坐标；转换时将结合坐标范围进一步判断',
+            }
     except Exception as e:
         result['error'] = str(e)
+
     return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 轻量 CRS 预检查：仅读文件头元数据，不解析几何，用于转换前的坐标系汇总弹窗
+# ──────────────────────────────────────────────────────────────────────────────
+def peek_crs(filepath):
+    """快速读取 MapGIS 文件的 CRS 元数据，不解析几何数据。"""
+    return _read_mapgis_spatial_header(filepath)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

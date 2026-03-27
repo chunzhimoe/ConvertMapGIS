@@ -419,16 +419,20 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                                 f" | 基准: {datum} | 投影: {proj_desc}{cm_str} | EPSG:{epsg}"
                             )
                         else:
-                            # 识别失败或模糊 → 跳过此文件
                             reason = note if note else '椭球体/投影参数无法匹配已知坐标系'
+                            if self.target_wkid is not None:
+                                self.log_signal.emit(
+                                    f"⚠️ 跳过文件（源坐标系自动识别失败）| 文件: {os.path.basename(mapgis_file)}"
+                                    f" | 原因: {reason}"
+                                )
+                                current += 1
+                                _progress_emitted = True
+                                self.progress_signal.emit(current, total)
+                                continue
                             self.log_signal.emit(
-                                f"⚠️ 跳过文件（源坐标系自动识别失败）| 文件: {os.path.basename(mapgis_file)}"
+                                f"⚠️ 源坐标系未可靠识别，按原始/推断坐标输出 | 文件: {os.path.basename(mapgis_file)}"
                                 f" | 原因: {reason}"
                             )
-                            current += 1
-                            _progress_emitted = True
-                            self.progress_signal.emit(current, total)
-                            continue
 
                     # ── 目标坐标系日志 ────────────────────────────────────────
                     if self.target_wkid is not None:
