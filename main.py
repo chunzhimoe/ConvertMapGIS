@@ -22,7 +22,7 @@ from qfluentwidgets import (
 import pymapgis
 
 # ========== 新增：版本号 ==========
-VERSION = "v1.0.17"
+VERSION = "v1.0.18"
 
 # ========== 常用坐标系字典（模块级，供转换配置和坐标计算器共享） ==========
 COMMON_COORD_SYSTEMS = {
@@ -294,7 +294,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             self.use_simple_naming = use_simple_naming
             self.input_dir = input_dir        # 文件夹模式的输入根目录（None = 文件模式）
             self.slib_dir = slib_dir          # slib 符号库目录（None = 不启用）
-            self.export_mode = export_mode    # 'shp' | 'gdb' | 'both'
+            self.export_mode = export_mode    # 'shp' | 'gdb_arcmap' | 'gdb_pro' | 'all'
 
         def run(self):
             """执行文件批量转换，支持比例尺和投影坐标系可选，支持MPJ工程文件展开，支持文件夹批量模式"""
@@ -373,11 +373,13 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
 
             total = len(tasks)
             current = 0
+            _seen_out_dirs: set = set()  # track all out_dirs used for GDB post-processing
             for task in tasks:
                 mapgis_file = task['mapgis_path']
                 output_subdir = task['output_subdir']
                 # 最终输出目录（文件夹模式带子目录，文件模式直接在 output_dir）
                 out_dir = os.path.join(self.output_dir, output_subdir) if output_subdir else self.output_dir
+                _seen_out_dirs.add(out_dir)
                 _progress_emitted = False  # 早退路径自己发射进度，避免双计
                 try:
                     start_time = time.time()
@@ -482,22 +484,29 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                         new_file_path = renamed_path
 
                     # 保存文件
-                    if self.export_mode in ('shp', 'both'):
+                    if self.export_mode in ('shp', 'all'):
                         reader.to_file(new_file_path)
-                    if self.export_mode in ('gdb', 'both'):
+                    # GDB 导出：根据 profile 分别写入
+                    _gdb_profiles = []
+                    if self.export_mode in ('gdb_arcmap', 'all'):
+                        _gdb_profiles.append('arcmap')
+                    if self.export_mode in ('gdb_pro', 'all'):
+                        _gdb_profiles.append('pro')
+                    for _gdb_profile in _gdb_profiles:
                         try:
                             import export_manager
                             gdb_path = export_manager.export_to_gdb(
                                 reader=reader,
                                 out_dir=out_dir,
                                 layer_key=os.path.splitext(os.path.basename(mapgis_file))[0],
+                                gdb_profile=_gdb_profile,
                                 log_fn=self.log_signal.emit,
                             )
-                            self.log_signal.emit(f"🗄️ GDB 图层已写入: {gdb_path}")
+                            self.log_signal.emit(f"🗄️ GDB 图层已写入 [{_gdb_profile}]: {gdb_path}")
                         except Exception as gdb_exc:
                             import traceback
                             self.log_signal.emit(
-                                f"❌ GDB 导出失败 | 文件：{os.path.basename(mapgis_file)} | {gdb_exc}\n"
+                                f"❌ GDB 导出失败 [{_gdb_profile}] | 文件：{os.path.basename(mapgis_file)} | {gdb_exc}\n"
                                 + ''.join(traceback.format_exception(type(gdb_exc), gdb_exc, gdb_exc.__traceback__))
                             )
 
@@ -540,14 +549,22 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             self.log_signal.emit('🎉 全部转换完成！')
 
             # ── GDB 后处理：通过 ArcPy 创建 Feature Dataset（如果可用）──────────
-            if self.export_mode in ('gdb', 'both'):
+            _finalise_profiles = []
+            if self.export_mode in ('gdb_arcmap', 'all'):
+                _finalise_profiles.append('arcmap')
+            if self.export_mode in ('gdb_pro', 'all'):
+                _finalise_profiles.append('pro')
+            if _finalise_profiles:
                 try:
                     import export_manager
-                    # finalise_gdb is idempotent: only runs if ArcGIS Python found
-                    export_manager.finalise_gdb(
-                        out_dir=self.output_dir,
-                        log_fn=self.log_signal.emit,
-                    )
+                    _out_dirs = _seen_out_dirs or {self.output_dir}
+                    for _out_dir in _out_dirs:
+                        for _profile in _finalise_profiles:
+                            export_manager.finalise_gdb(
+                                out_dir=_out_dir,
+                                gdb_profile=_profile,
+                                log_fn=self.log_signal.emit,
+                            )
                 except Exception as _fgdb_exc:
                     self.log_signal.emit(
                         f"ℹ️ GDB Feature Dataset 重组跳过: {_fgdb_exc}"
@@ -705,18 +722,28 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.naming_checkbox = CheckBox('直接替换后缀', self)
         self.naming_checkbox.setToolTip('勾选后文件名直接替换后缀为shp，不勾选则保持原命名方式')
 
-        # 导出格式选择（SHP / GDB / 两者）
-        self.export_shp_radio  = QRadioButton('SHP', self)
-        self.export_gdb_radio  = QRadioButton('GDB', self)
-        self.export_both_radio = QRadioButton('两者', self)
+        # 导出格式选择（SHP / ArcMap GDB / Pro GDB / 全部）
+        self.export_shp_radio      = QRadioButton('SHP', self)
+        self.export_arcmap_radio   = QRadioButton('ArcMap GDB', self)
+        self.export_pro_radio      = QRadioButton('Pro GDB', self)
+        self.export_all_radio      = QRadioButton('全部', self)
         self.export_shp_radio.setChecked(True)
         self.export_shp_radio.setToolTip('仅导出 Shapefile')
-        self.export_gdb_radio.setToolTip('仅导出 FileGDB（检测到 ArcGIS 时自动创建 Feature Dataset，支持拖拽整个数据集到 ArcMap）')
-        self.export_both_radio.setToolTip('同时导出 Shapefile 和 FileGDB')
+        self.export_arcmap_radio.setToolTip(
+            '仅导出 ArcMap 兼容 FileGDB（output_arcmap.gdb）\n'
+            '字段类型严格降级（int64→int32, bool→int32, datetime→str），\n'
+            '可直接拖拽到 ArcMap 10.x 而不报"没有注册类"错误'
+        )
+        self.export_pro_radio.setToolTip(
+            '仅导出 ArcGIS Pro 兼容 FileGDB（output_pro.gdb）\n'
+            '保留 int64/bool/datetime 原生类型，适用于 ArcGIS Pro 3.x'
+        )
+        self.export_all_radio.setToolTip('同时导出 SHP、ArcMap GDB 和 Pro GDB 三种格式')
         self.export_format_group = QButtonGroup(self)
-        self.export_format_group.addButton(self.export_shp_radio,  0)
-        self.export_format_group.addButton(self.export_gdb_radio,  1)
-        self.export_format_group.addButton(self.export_both_radio, 2)
+        self.export_format_group.addButton(self.export_shp_radio,    0)
+        self.export_format_group.addButton(self.export_arcmap_radio, 1)
+        self.export_format_group.addButton(self.export_pro_radio,    2)
+        self.export_format_group.addButton(self.export_all_radio,    3)
         export_fmt_label = QLabel("导出格式：")
 
         # 转换按钮
@@ -738,8 +765,9 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.convert_layout.addSpacing(8)
         self.convert_layout.addWidget(export_fmt_label)
         self.convert_layout.addWidget(self.export_shp_radio)
-        self.convert_layout.addWidget(self.export_gdb_radio)
-        self.convert_layout.addWidget(self.export_both_radio)
+        self.convert_layout.addWidget(self.export_arcmap_radio)
+        self.convert_layout.addWidget(self.export_pro_radio)
+        self.convert_layout.addWidget(self.export_all_radio)
         self.convert_layout.addWidget(self.convert_button)
         self.convert_layout.addStretch()
 
@@ -1106,10 +1134,12 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         target_wkid = None if self.tgt_auto_radio.isChecked() else self._get_epsg_from_combo(self.tgt_combo)
 
         # 解析导出格式
-        if self.export_gdb_radio.isChecked():
-            export_mode = 'gdb'
-        elif self.export_both_radio.isChecked():
-            export_mode = 'both'
+        if self.export_arcmap_radio.isChecked():
+            export_mode = 'gdb_arcmap'
+        elif self.export_pro_radio.isChecked():
+            export_mode = 'gdb_pro'
+        elif self.export_all_radio.isChecked():
+            export_mode = 'all'
         else:
             export_mode = 'shp'
 
@@ -1163,6 +1193,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
             f"🔧 比例尺设置: {'启用 (' + self.scale_box.text() + ')' if self.scale_checkbox.isChecked() else '禁用'}",
             f"🌐 源坐标系: {src_crs_desc}",
             f"🎯 目标坐标系: {tgt_crs_desc}",
+            f"📦 导出格式: {self.export_arcmap_radio.text() if self.export_arcmap_radio.isChecked() else self.export_pro_radio.text() if self.export_pro_radio.isChecked() else self.export_all_radio.text() if self.export_all_radio.isChecked() else 'SHP'}",
             f"📚 slib 符号库: {self.slib_dir if self.slib_dir else '未启用'}",
             f"📝 文件命名方式: {'直接替换后缀' if self.naming_checkbox.isChecked() else '保持原命名方式'}",
             "=" * 60,

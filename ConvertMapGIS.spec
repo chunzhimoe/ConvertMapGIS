@@ -3,7 +3,12 @@ from PyInstaller.utils.hooks import collect_all
 import glob, os
 import shutil
 
-datas = [('resource/*', 'resource'), ('pymapgis.py', '.')]
+datas = [
+    ('resource/*', 'resource'),
+    ('pymapgis.py', '.'),
+    ('arcgis_fgdb_helper_arcmap.py', '.'),
+    ('arcgis_fgdb_helper_pro.py', '.'),
+]
 binaries = []
 hiddenimports = ['pyogrio']
 tmp_ret = collect_all('pyogrio')
