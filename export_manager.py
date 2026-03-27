@@ -301,16 +301,17 @@ def _write_feature_class(gdf, gdb: str, fc_name: str, shape_type: str, log_fn) -
     """
     fc_path = os.path.join(gdb, fc_name)
 
-    # layer_options for pyogrio's OpenFileGDB driver
-    layer_options = [
-        'TARGET_ARCGIS_VERSION=ARCGIS_PRO_3_2_OR_LATER',
-    ]
+    # layer_options for pyogrio's OpenFileGDB driver (must be a dict)
+    layer_options = {
+        'TARGET_ARCGIS_VERSION': 'ARCGIS_PRO_3_2_OR_LATER',
+    }
 
     gdf.to_file(
         gdb,
         driver='OpenFileGDB',
         layer=fc_name,
         layer_options=layer_options,
+        promote_to_multi=True,
     )
     log_fn(f"✅ GDB 写入成功: {fc_name}")
     return fc_path

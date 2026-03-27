@@ -22,7 +22,7 @@ from qfluentwidgets import (
 import pymapgis
 
 # ========== 新增：版本号 ==========
-VERSION = "v1.0.12"
+VERSION = "v1.0.13"
 
 # ========== 常用坐标系字典（模块级，供转换配置和坐标计算器共享） ==========
 COMMON_COORD_SYSTEMS = {
