@@ -360,6 +360,51 @@ def _downcast_int64_to_int32(gdf, log_fn):
     return gdf
 
 
+def _sanitize_field_types(gdf, log_fn):
+    """Convert unsupported field types to ArcMap-safe equivalents.
+
+    ArcMap 10.x FileGDB via OpenFileGDB driver has limited type support:
+    - date/datetime/time   → string (ISO format)
+    - bool                 → int32 (0 / 1)
+    - object (mixed/str)   → string (str cast)
+    - complex / other      → string
+
+    This prevents "项目没有定义 / 没有注册类" errors caused by unknown
+    field types being written into the GDB.
+    """
+    import numpy as np
+    import pandas as pd
+
+    converted = []
+    for col in list(gdf.columns):
+        if col == gdf.geometry.name:
+            continue
+        s = gdf[col]
+        dtype = s.dtype
+
+        if dtype == bool or dtype == np.bool_:
+            gdf[col] = s.astype(np.int32)
+            converted.append((col, 'bool→int32'))
+        elif dtype == 'object':
+            # object columns may contain datetime objects or mixed types
+            gdf[col] = s.apply(
+                lambda v: v.isoformat() if hasattr(v, 'isoformat') else (str(v) if v is not None else '')
+            )
+            converted.append((col, 'object→str'))
+        elif hasattr(dtype, 'kind') and dtype.kind == 'M':
+            # numpy datetime64 / pandas DatetimeTZDtype
+            gdf[col] = s.dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+            converted.append((col, 'datetime→str'))
+        elif hasattr(dtype, 'kind') and dtype.kind == 'm':
+            # timedelta
+            gdf[col] = s.astype(str)
+            converted.append((col, 'timedelta→str'))
+
+    if converted:
+        log_fn(f"ℹ️ 字段类型降级（ArcMap 兼容）: {converted}")
+    return gdf
+
+
 # ---------------------------------------------------------------------------
 # Internal: write feature class
 # ---------------------------------------------------------------------------
@@ -373,8 +418,26 @@ def _write_feature_class(gdf, gdb: str, fc_name: str, shape_type: str, log_fn) -
     """
     fc_path = os.path.join(gdb, fc_name)
 
+    # Diagnostic: log library versions and field types to aid debugging
+    try:
+        import geopandas as _gpd
+        import pyogrio as _pyogrio
+        from osgeo import gdal as _gdal
+        log_fn(
+            f"ℹ️ 版本诊断 — geopandas={_gpd.__version__} "
+            f"pyogrio={_pyogrio.__version__} "
+            f"GDAL={_gdal.__version__}"
+        )
+    except Exception:
+        pass
+    field_types = {col: str(gdf[col].dtype) for col in gdf.columns if col != gdf.geometry.name}
+    log_fn(f"ℹ️ 写入前字段类型: {field_types}")
+
     # Belt-and-suspenders: downcast any remaining int64 columns to int32
     gdf = _downcast_int64_to_int32(gdf, log_fn)
+
+    # Convert unsupported types (datetime, bool, object) to ArcMap-safe types
+    gdf = _sanitize_field_types(gdf, log_fn)
 
     # layer_options for pyogrio's OpenFileGDB driver (must be a dict)
     # Use 'ALL' (not 'ARCGIS_PRO_3_2_OR_LATER') so the GDB remains compatible
@@ -389,6 +452,7 @@ def _write_feature_class(gdf, gdb: str, fc_name: str, shape_type: str, log_fn) -
         layer=fc_name,
         layer_options=layer_options,
         promote_to_multi=True,
+        engine='pyogrio',
     )
     log_fn(f"✅ GDB 写入成功: {fc_name}")
     return fc_path

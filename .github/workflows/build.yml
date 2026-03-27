@@ -30,7 +30,7 @@ jobs:
         pip install pyshp
         pip install pypinyin
         pip install pyproj
-        pip install geopandas
+        pip install "geopandas==1.0.1" "pyogrio==0.10.0"
 
     - name: 打包应用
       run: |
