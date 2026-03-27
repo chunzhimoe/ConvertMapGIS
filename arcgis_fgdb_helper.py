@@ -16,6 +16,17 @@ create_lyrx(gdb_path, fc_name, out_dir, layer_key, shape_type, log_fn=None)
     Applies basic labeling if the feature class contains a 'text' field
     (which MapGIS point layers often carry).
 
+create_gdb(gdb_path)
+    Create a new FileGDB at gdb_path using ArcPy (arcpy.management.CreateFileGDB).
+
+ensure_feature_dataset(gdb_path, ds_name, wkid)
+    Create a Feature Dataset inside gdb_path if it does not already exist.
+    The spatial reference is defined by the EPSG WKID.
+
+copy_feature_class(src_gdb, fc_name, dst_gdb, ds_name=None)
+    Copy a feature class from src_gdb into dst_gdb (optionally inside a
+    Feature Dataset).  Uses arcpy.conversion.FeatureClassToFeatureClass.
+
 apply_symbology_from_slib(gdb_path, fc_name, slib_rows, log_fn=None)
     (V2 – not yet implemented)  Translate MapGIS symbol info into CIM
     symbology and apply it to the feature class layer.
@@ -40,7 +51,9 @@ JSON result to stdout.  This lets the main PyInstaller process call ArcPy
 operations without importing arcpy into its own process space (which would
 break packaging).
 
-Stdin payload schema:
+Stdin payload schemas:
+
+  create_lyrx:
     {
         "action":     "create_lyrx",
         "gdb_path":   "...",
@@ -51,8 +64,37 @@ Stdin payload schema:
         "lyrx_path":  "..."   // optional override
     }
 
+  create_gdb:
+    {
+        "action":   "create_gdb",
+        "gdb_path": "C:\\out\\output_arcpy.gdb"
+    }
+
+  ensure_feature_dataset:
+    {
+        "action":   "ensure_feature_dataset",
+        "gdb_path": "C:\\out\\output_arcpy.gdb",
+        "ds_name":  "CRS_4326",
+        "wkid":     4326
+    }
+
+  copy_feature_class:
+    {
+        "action":   "copy_feature_class",
+        "src_gdb":  "C:\\out\\output.gdb",
+        "fc_name":  "pt_abc12345",
+        "dst_gdb":  "C:\\out\\output_arcpy.gdb",
+        "ds_name":  "CRS_4326"   // optional; omit to copy to root of GDB
+    }
+
+  batch:
+    {
+        "action":  "batch",
+        "steps":   [ <payload1>, <payload2>, ... ]
+    }
+
 Stdout:
-    {"ok": true, "lyrx_path": "..."} | {"ok": false, "error": "..."}
+    {"ok": true, ...} | {"ok": false, "error": "..."}
 """
 
 from __future__ import annotations
@@ -126,6 +168,116 @@ def create_lyrx(
     return lyrx_path
 
 
+def create_gdb(gdb_path: str, log_fn: Optional[Callable[[str], None]] = None) -> str:
+    """Create a new FileGDB at *gdb_path* using ArcPy.
+
+    If the GDB already exists it is left untouched (idempotent).
+
+    Parameters
+    ----------
+    gdb_path : full path to the .gdb directory to create
+               e.g. r"C:\\out\\output_arcpy.gdb"
+
+    Returns
+    -------
+    str – the gdb_path that was created / already exists
+    """
+    import arcpy
+
+    def _log(msg: str):
+        if log_fn:
+            log_fn(msg)
+
+    parent = os.path.dirname(gdb_path)
+    gdb_name = os.path.basename(gdb_path)
+
+    if not os.path.exists(gdb_path):
+        arcpy.management.CreateFileGDB(parent, gdb_name)
+        _log(f"✅ ArcPy 创建 GDB: {gdb_name}")
+    else:
+        _log(f"ℹ️ GDB 已存在，跳过创建: {gdb_name}")
+
+    return gdb_path
+
+
+def ensure_feature_dataset(
+    gdb_path: str,
+    ds_name: str,
+    wkid: int,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Create a Feature Dataset inside *gdb_path* if it does not exist.
+
+    Parameters
+    ----------
+    gdb_path : path to the FileGDB
+    ds_name  : name of the Feature Dataset (e.g. "CRS_4326")
+    wkid     : EPSG code used to define the spatial reference
+
+    Returns
+    -------
+    str – path to the Feature Dataset  (``gdb_path/ds_name``)
+    """
+    import arcpy
+
+    def _log(msg: str):
+        if log_fn:
+            log_fn(msg)
+
+    ds_path = os.path.join(gdb_path, ds_name)
+    if arcpy.Exists(ds_path):
+        _log(f"ℹ️ Feature Dataset 已存在: {ds_name}")
+        return ds_path
+
+    sr = arcpy.SpatialReference(wkid)
+    arcpy.management.CreateFeatureDataset(gdb_path, ds_name, sr)
+    _log(f"✅ 创建 Feature Dataset: {ds_name} (WKID={wkid})")
+    return ds_path
+
+
+def copy_feature_class(
+    src_gdb: str,
+    fc_name: str,
+    dst_gdb: str,
+    ds_name: Optional[str] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Copy a feature class from *src_gdb* into *dst_gdb*.
+
+    Parameters
+    ----------
+    src_gdb  : source FileGDB path
+    fc_name  : feature class name (not a full path)
+    dst_gdb  : destination FileGDB path
+    ds_name  : Feature Dataset name inside *dst_gdb*; copy to root if None
+
+    Returns
+    -------
+    str – path of the copied feature class in the destination GDB
+    """
+    import arcpy
+
+    def _log(msg: str):
+        if log_fn:
+            log_fn(msg)
+
+    src_fc = os.path.join(src_gdb, fc_name)
+    if ds_name:
+        out_path = os.path.join(dst_gdb, ds_name)
+    else:
+        out_path = dst_gdb
+
+    dst_fc = os.path.join(out_path, fc_name)
+
+    if arcpy.Exists(dst_fc):
+        _log(f"ℹ️ 目标 FC 已存在，跳过复制: {fc_name}")
+        return dst_fc
+
+    arcpy.conversion.FeatureClassToFeatureClass(src_fc, out_path, fc_name)
+    _log(f"✅ 已复制 FC: {fc_name} → {out_path}")
+    return dst_fc
+
+
 def apply_symbology_from_slib(
     gdb_path: str,
     fc_name: str,
@@ -182,24 +334,69 @@ def _apply_basic_labeling(lyr_or_name, shape_type: str, arcpy, log_fn):
 # Subprocess / standalone entry point
 # ---------------------------------------------------------------------------
 
+def _handle_action(payload: dict) -> dict:
+    """Dispatch a single action payload and return a result dict."""
+    action = payload.get('action', '')
+
+    if action == 'create_lyrx':
+        result_path = create_lyrx(
+            gdb_path=payload['gdb_path'],
+            fc_name=payload['fc_name'],
+            out_dir=payload['out_dir'],
+            layer_key=payload['layer_key'],
+            shape_type=payload.get('shape_type', ''),
+            lyrx_path=payload.get('lyrx_path'),
+        )
+        return {'ok': True, 'lyrx_path': result_path}
+
+    elif action == 'create_gdb':
+        result_path = create_gdb(
+            gdb_path=payload['gdb_path'],
+        )
+        return {'ok': True, 'gdb_path': result_path}
+
+    elif action == 'ensure_feature_dataset':
+        ds_path = ensure_feature_dataset(
+            gdb_path=payload['gdb_path'],
+            ds_name=payload['ds_name'],
+            wkid=int(payload['wkid']),
+        )
+        return {'ok': True, 'ds_path': ds_path}
+
+    elif action == 'copy_feature_class':
+        dst_fc = copy_feature_class(
+            src_gdb=payload['src_gdb'],
+            fc_name=payload['fc_name'],
+            dst_gdb=payload['dst_gdb'],
+            ds_name=payload.get('ds_name'),
+        )
+        return {'ok': True, 'dst_fc': dst_fc}
+
+    elif action == 'batch':
+        results = []
+        for step in payload.get('steps', []):
+            try:
+                r = _handle_action(step)
+            except Exception as exc:
+                import traceback
+                r = {'ok': False, 'error': str(exc), 'traceback': traceback.format_exc()}
+            results.append(r)
+            if not r.get('ok'):
+                # Stop batch on first failure
+                return {'ok': False, 'error': r.get('error', 'batch step failed'), 'results': results}
+        return {'ok': True, 'results': results}
+
+    else:
+        return {'ok': False, 'error': f'Unknown action: {action}'}
+
+
 def _run_from_stdin():
     """Read a JSON payload from stdin, execute the requested action, print result."""
     import sys
     payload = json.load(sys.stdin)
-    action = payload.get('action', '')
     try:
-        if action == 'create_lyrx':
-            result_path = create_lyrx(
-                gdb_path=payload['gdb_path'],
-                fc_name=payload['fc_name'],
-                out_dir=payload['out_dir'],
-                layer_key=payload['layer_key'],
-                shape_type=payload.get('shape_type', ''),
-                lyrx_path=payload.get('lyrx_path'),
-            )
-            print(json.dumps({'ok': True, 'lyrx_path': result_path}))
-        else:
-            print(json.dumps({'ok': False, 'error': f'Unknown action: {action}'}))
+        result = _handle_action(payload)
+        print(json.dumps(result))
     except Exception as exc:
         import traceback
         print(json.dumps({

@@ -22,7 +22,7 @@ from qfluentwidgets import (
 import pymapgis
 
 # ========== 新增：版本号 ==========
-VERSION = "v1.0.16"
+VERSION = "v1.0.17"
 
 # ========== 常用坐标系字典（模块级，供转换配置和坐标计算器共享） ==========
 COMMON_COORD_SYSTEMS = {
@@ -538,6 +538,21 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                     current += 1
                     self.progress_signal.emit(current, total)
             self.log_signal.emit('🎉 全部转换完成！')
+
+            # ── GDB 后处理：通过 ArcPy 创建 Feature Dataset（如果可用）──────────
+            if self.export_mode in ('gdb', 'both'):
+                try:
+                    import export_manager
+                    # finalise_gdb is idempotent: only runs if ArcGIS Python found
+                    export_manager.finalise_gdb(
+                        out_dir=self.output_dir,
+                        log_fn=self.log_signal.emit,
+                    )
+                except Exception as _fgdb_exc:
+                    self.log_signal.emit(
+                        f"ℹ️ GDB Feature Dataset 重组跳过: {_fgdb_exc}"
+                    )
+
             self.finished_signal.emit()
 
         def _compute_output_subdir(self, layer_path, input_root):
@@ -696,7 +711,7 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
         self.export_both_radio = QRadioButton('两者', self)
         self.export_shp_radio.setChecked(True)
         self.export_shp_radio.setToolTip('仅导出 Shapefile')
-        self.export_gdb_radio.setToolTip('仅导出 FileGDB（需要 ArcGIS Pro / ArcPy）')
+        self.export_gdb_radio.setToolTip('仅导出 FileGDB（检测到 ArcGIS 时自动创建 Feature Dataset，支持拖拽整个数据集到 ArcMap）')
         self.export_both_radio.setToolTip('同时导出 Shapefile 和 FileGDB')
         self.export_format_group = QButtonGroup(self)
         self.export_format_group.addButton(self.export_shp_radio,  0)

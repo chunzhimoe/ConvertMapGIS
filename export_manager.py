@@ -38,7 +38,10 @@ import os
 import re
 import json
 import hashlib
-from typing import Callable, Optional, TYPE_CHECKING
+import glob as _glob
+import subprocess
+import sys
+from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import pymapgis  # noqa: F401 – only for type hints
@@ -243,6 +246,15 @@ def _normalise_geometry(gdf, shape_type: str, log_fn):
 
 
 # ---------------------------------------------------------------------------
+# Module-level registry of written feature classes (for post-export ArcPy step)
+# ---------------------------------------------------------------------------
+
+# Maps out_dir → list of {'fc_name': str, 'crs_wkid': int|None}
+# Populated by export_to_gdb(); consumed by reorganise_gdb_with_arcpy().
+_gdb_fc_registry: Dict[str, List[Dict]] = {}
+
+
+# ---------------------------------------------------------------------------
 # Core export function
 # ---------------------------------------------------------------------------
 
@@ -306,6 +318,16 @@ def export_to_gdb(
     # ── 5. Write feature class ───────────────────────────────────────────────
     fc_path = _write_feature_class(gdf_out, gdb, fc_name, shape_type, _log)
 
+    # ── 5b. Register FC for post-export ArcPy step ───────────────────────────
+    crs_wkid = _wkid_from_crs(gdf_out.crs if hasattr(gdf_out, 'crs') else None)
+    if out_dir not in _gdb_fc_registry:
+        _gdb_fc_registry[out_dir] = []
+    # Avoid duplicates (re-running same layer)
+    _gdb_fc_registry[out_dir] = [
+        r for r in _gdb_fc_registry[out_dir] if r['fc_name'] != fc_name
+    ]
+    _gdb_fc_registry[out_dir].append({'fc_name': fc_name, 'crs_wkid': crs_wkid})
+
     # ── 6. Write / update manifest ───────────────────────────────────────────
     try:
         _update_manifest(gdb, ascii_key, layer_key, reader, fc_name, gdf_out)
@@ -337,6 +359,29 @@ def export_to_gdb(
         _log(f"⚠️ .lyrx 生成失败（非致命）: {exc}")
 
     return fc_path
+
+
+def finalise_gdb(
+    out_dir: str,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Post-export step: reorganise output.gdb with ArcPy Feature Datasets.
+
+    Call this **once** after all ``export_to_gdb()`` calls for a session are
+    complete.  It reads the module-level FC registry for *out_dir* and calls
+    ``reorganise_gdb_with_arcpy()``.
+
+    Returns True if the ArcPy reorganisation succeeded, False otherwise.
+    """
+    fc_records = _gdb_fc_registry.get(out_dir, [])
+    if not fc_records:
+        return False
+
+    result = reorganise_gdb_with_arcpy(out_dir, fc_records, log_fn=log_fn)
+
+    # Clear registry for this session so repeated calls are safe
+    _gdb_fc_registry.pop(out_dir, None)
+    return result
 
 
 def _downcast_int64_to_int32(gdf, log_fn):
@@ -522,3 +567,316 @@ def _update_slib_table(gdb: str, ascii_key: str, slib_rows: list):
 
     with open(table_file, 'w', encoding='utf-8') as f:
         json.dump(table, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# ArcGIS Desktop Python interpreter detection
+# ---------------------------------------------------------------------------
+
+def _find_arcgis_desktop_python() -> Optional[str]:
+    """Locate the ArcGIS Desktop (ArcMap 10.x) Python 2.7 interpreter.
+
+    Search strategy (Windows only):
+    1. Common installation paths for ArcGIS 10.1 – 10.8.
+    2. Registry: HKLM\\SOFTWARE\\ESRI\\Desktop<ver>\\PythonDir (via winreg).
+    3. Fallback: search C:\\Python27 subdirectories for a python.exe that
+       has an 'arcpy' package next to it.
+
+    Returns None on non-Windows or when not found.
+    """
+    if sys.platform != 'win32':
+        return None
+
+    # ── Strategy 1: well-known paths ─────────────────────────────────────────
+    candidates: List[str] = []
+    for ver in ['10.8', '10.7', '10.6', '10.5', '10.4', '10.3', '10.2', '10.1']:
+        for drive in ['C:', 'D:', 'E:']:
+            candidates.append(
+                os.path.join(drive, os.sep, 'Python27', f'ArcGIS{ver}', 'python.exe')
+            )
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+
+    # ── Strategy 2: registry lookup ──────────────────────────────────────────
+    try:
+        import winreg
+        for ver in ['10.8', '10.7', '10.6', '10.5', '10.4', '10.3', '10.2', '10.1']:
+            key_path = f'SOFTWARE\\ESRI\\Desktop{ver}'
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(hive, key_path) as key:
+                        python_dir, _ = winreg.QueryValueEx(key, 'PythonDir')
+                        exe = os.path.join(python_dir, 'python.exe')
+                        if os.path.isfile(exe):
+                            return exe
+                except OSError:
+                    pass
+    except ImportError:
+        pass
+
+    # ── Strategy 3: search C:\Python27 subdirs ───────────────────────────────
+    base = r'C:\Python27'
+    if os.path.isdir(base):
+        for sub in os.listdir(base):
+            exe = os.path.join(base, sub, 'python.exe')
+            arcpy_dir = os.path.join(base, sub, 'Lib', 'site-packages', 'arcpy')
+            if os.path.isfile(exe) and os.path.isdir(arcpy_dir):
+                return exe
+
+    return None
+
+
+def _find_arcgis_pro_python() -> Optional[str]:
+    """Locate the ArcGIS Pro conda Python interpreter.
+
+    Search strategy:
+    1. Common ArcGIS Pro conda env path.
+    2. Registry: HKLM\\SOFTWARE\\ESRI\\ArcGIS Pro.
+    3. PATH – if 'arcpy' can be imported by the current interpreter.
+
+    Returns None when not found.
+    """
+    if sys.platform != 'win32':
+        return None
+
+    # ── Strategy 1: common paths ─────────────────────────────────────────────
+    for drive in ['C:', 'D:']:
+        for sub in [
+            r'Program Files\ArcGIS\Pro\bin\Python\envs\arcgispro-py3\python.exe',
+            r'ArcGIS\Pro\bin\Python\envs\arcgispro-py3\python.exe',
+        ]:
+            exe = os.path.join(drive, os.sep, sub)
+            if os.path.isfile(exe):
+                return exe
+
+    # ── Strategy 2: registry ─────────────────────────────────────────────────
+    try:
+        import winreg
+        key_path = r'SOFTWARE\ESRI\ArcGIS Pro'
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(hive, key_path) as key:
+                    install_dir, _ = winreg.QueryValueEx(key, 'InstallDir')
+                    exe = os.path.join(
+                        install_dir, 'bin', 'Python', 'envs', 'arcgispro-py3', 'python.exe'
+                    )
+                    if os.path.isfile(exe):
+                        return exe
+            except OSError:
+                pass
+    except ImportError:
+        pass
+
+    return None
+
+
+def find_arcgis_python() -> Optional[str]:
+    """Return any available ArcGIS Python interpreter (Desktop preferred).
+
+    Preference order: ArcMap 10.x Python 2.7 → ArcGIS Pro Python 3.x.
+    Returns None if neither is found.
+    """
+    return _find_arcgis_desktop_python() or _find_arcgis_pro_python()
+
+
+# ---------------------------------------------------------------------------
+# ArcPy subprocess helper
+# ---------------------------------------------------------------------------
+
+def _call_arcpy_helper(
+    python_exe: str,
+    helper_script: str,
+    payload: dict,
+    log_fn,
+    timeout: int = 300,
+) -> dict:
+    """Run arcgis_fgdb_helper.py via *python_exe* with *payload* on stdin.
+
+    Parameters
+    ----------
+    python_exe    : path to the ArcGIS Python interpreter
+    helper_script : absolute path to arcgis_fgdb_helper.py
+    payload       : dict to serialise as JSON on stdin
+    timeout       : seconds to wait for the subprocess
+
+    Returns
+    -------
+    dict – the JSON result from stdout; {'ok': False, 'error': ...} on failure.
+    """
+    try:
+        proc = subprocess.run(
+            [python_exe, helper_script],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding='utf-8',
+        )
+        stdout = proc.stdout.strip()
+        stderr = proc.stderr.strip()
+
+        if stderr:
+            log_fn(f"ℹ️ ArcPy helper stderr: {stderr[:400]}")
+
+        if not stdout:
+            return {'ok': False, 'error': 'arcgis_fgdb_helper returned no output'}
+
+        return json.loads(stdout)
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': f'arcgis_fgdb_helper timed out after {timeout}s'}
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# CRS grouping helpers
+# ---------------------------------------------------------------------------
+
+def _wkid_from_crs(crs) -> Optional[int]:
+    """Extract an EPSG WKID integer from a pyproj CRS object.
+
+    Returns None if the CRS is unknown or has no EPSG code.
+    """
+    if crs is None:
+        return None
+    try:
+        epsg = crs.to_epsg()
+        if epsg:
+            return int(epsg)
+    except Exception:
+        pass
+    # Fallback: parse from WKT authority node
+    try:
+        auth, code = crs.to_authority()
+        return int(code)
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Post-export ArcPy GDB reorganisation (called once after all layers written)
+# ---------------------------------------------------------------------------
+
+def reorganise_gdb_with_arcpy(
+    out_dir: str,
+    fc_records: List[Dict],
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Reorganise the GDAL-written GDB into ArcPy-native GDB with Feature Datasets.
+
+    This function is called **once** after all feature classes have been
+    written to ``output.gdb`` by GDAL/pyogrio.  It:
+
+    1. Detects an ArcGIS Python interpreter on the host.
+    2. Creates a new ``output_arcpy.gdb`` via ArcPy (ensures ArcMap-native format).
+    3. Groups feature classes by CRS, creates one Feature Dataset per unique CRS.
+    4. Copies each feature class from ``output.gdb`` into the correct Dataset.
+    5. Renames ``output.gdb`` → ``output_gdal.gdb`` and
+              ``output_arcpy.gdb`` → ``output.gdb``
+       so downstream code still finds ``output.gdb``.
+
+    Parameters
+    ----------
+    out_dir    : directory containing ``output.gdb``
+    fc_records : list of dicts, each with keys:
+                   'fc_name'  – feature class name (ASCII)
+                   'crs_wkid' – int EPSG code (may be None)
+    log_fn     : optional logger
+
+    Returns
+    -------
+    bool – True if reorganisation succeeded, False if skipped/failed.
+    """
+    def _log(msg: str):
+        if log_fn:
+            log_fn(msg)
+
+    if not fc_records:
+        return False
+
+    # ── 1. Find ArcGIS Python ────────────────────────────────────────────────
+    python_exe = find_arcgis_python()
+    if not python_exe:
+        _log("ℹ️ 未找到 ArcGIS Python 解释器，跳过 Feature Dataset 重组（GDB 仍可用，请在 ArcMap 中展开后逐个图层添加）")
+        return False
+
+    _log(f"ℹ️ 找到 ArcGIS Python: {python_exe}")
+
+    # ── 2. Locate helper script ───────────────────────────────────────────────
+    helper_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'arcgis_fgdb_helper.py')
+    if not os.path.isfile(helper_script):
+        _log(f"⚠️ 找不到 arcgis_fgdb_helper.py: {helper_script}")
+        return False
+
+    src_gdb = gdb_path_for_dir(out_dir)           # output.gdb (GDAL-written)
+    dst_gdb = os.path.join(out_dir, 'output_arcpy.gdb')
+
+    # ── 3. Build batch payload ───────────────────────────────────────────────
+    steps: List[dict] = []
+
+    # 3a. Create destination GDB
+    steps.append({'action': 'create_gdb', 'gdb_path': dst_gdb})
+
+    # 3b. Group FC records by WKID (None → 'Unknown_CRS')
+    crs_groups: Dict[str, Tuple[int, List[str]]] = {}
+    for rec in fc_records:
+        wkid = rec.get('crs_wkid')
+        if wkid:
+            ds_name = f'CRS_{wkid}'
+        else:
+            ds_name = 'Unknown_CRS'
+            wkid = 4326  # fallback SR for unknown CRS dataset
+
+        if ds_name not in crs_groups:
+            crs_groups[ds_name] = (wkid, [])
+        crs_groups[ds_name][1].append(rec['fc_name'])
+
+    # 3c. Create Feature Datasets
+    for ds_name, (wkid, _) in crs_groups.items():
+        steps.append({
+            'action':   'ensure_feature_dataset',
+            'gdb_path': dst_gdb,
+            'ds_name':  ds_name,
+            'wkid':     wkid,
+        })
+
+    # 3d. Copy feature classes
+    for ds_name, (_, fc_list) in crs_groups.items():
+        for fc_name in fc_list:
+            steps.append({
+                'action':  'copy_feature_class',
+                'src_gdb': src_gdb,
+                'fc_name': fc_name,
+                'dst_gdb': dst_gdb,
+                'ds_name': ds_name,
+            })
+
+    batch_payload = {'action': 'batch', 'steps': steps}
+
+    # ── 4. Call helper ───────────────────────────────────────────────────────
+    _log(f"⏳ 通过 ArcPy 重组 GDB（共 {len(steps)} 步）...")
+    result = _call_arcpy_helper(python_exe, helper_script, batch_payload, _log, timeout=600)
+
+    if not result.get('ok'):
+        _log(f"⚠️ ArcPy GDB 重组失败: {result.get('error', '未知错误')}")
+        _log("ℹ️ 保留原始 GDAL GDB，请在 ArcMap 中手动展开 output.gdb 逐个添加图层")
+        return False
+
+    _log("✅ ArcPy GDB 重组完成")
+
+    # ── 5. Swap GDB names ────────────────────────────────────────────────────
+    import shutil
+    gdal_gdb = os.path.join(out_dir, 'output_gdal.gdb')
+    try:
+        if os.path.exists(gdal_gdb):
+            shutil.rmtree(gdal_gdb)
+        os.rename(src_gdb, gdal_gdb)
+        os.rename(dst_gdb, src_gdb)
+        _log("✅ 已将 ArcPy GDB 重命名为 output.gdb（原 GDAL GDB 保存为 output_gdal.gdb）")
+    except Exception as exc:
+        _log(f"⚠️ GDB 重命名失败（非致命）: {exc} — ArcPy GDB 保存在 output_arcpy.gdb")
+
+    return True
