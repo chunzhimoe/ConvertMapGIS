@@ -22,7 +22,7 @@ from qfluentwidgets import (
 import pymapgis
 
 # ========== 新增：版本号 ==========
-VERSION = "v1.0.13"
+VERSION = "v1.0.14"
 
 # ========== 常用坐标系字典（模块级，供转换配置和坐标计算器共享） ==========
 COMMON_COORD_SYSTEMS = {
@@ -320,6 +320,19 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                             f"📂 MPJ工程文件：{os.path.relpath(mpj_path, self.input_dir)} | "
                             f"共 {proj.layer_count} 个图层，解析到 {len(layers)} 个有效路径"
                         )
+                        # 若存在未解析图层，输出诊断信息
+                        if len(layers) < proj.layer_count:
+                            for report in getattr(proj, 'last_resolve_report', []):
+                                if report.get('skip_reason') == 'not_found':
+                                    refs = ', '.join(report.get('raw_paths', []))
+                                    self.log_signal.emit(
+                                        f"  ⚠️ 图层文件未找到 | MPJ引用: {refs}"
+                                    )
+                                elif report.get('skip_reason') == 'duplicate':
+                                    refs = ', '.join(report.get('raw_paths', []))
+                                    self.log_signal.emit(
+                                        f"  ⚠️ 重名冲突已跳过 | MPJ引用: {refs}"
+                                    )
                         for layer in layers:
                             layer_path = layer['path']
                             # 计算输出子目录（保留目录结构）
@@ -338,6 +351,19 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                                 f"📂 MPJ工程文件：{os.path.basename(path)} | "
                                 f"共 {proj.layer_count} 个图层，解析到 {len(layers)} 个有效路径"
                             )
+                            # 若存在未解析图层，输出诊断信息
+                            if len(layers) < proj.layer_count:
+                                for report in getattr(proj, 'last_resolve_report', []):
+                                    if report.get('skip_reason') == 'not_found':
+                                        refs = ', '.join(report.get('raw_paths', []))
+                                        self.log_signal.emit(
+                                            f"  ⚠️ 图层文件未找到 | MPJ引用: {refs}"
+                                        )
+                                    elif report.get('skip_reason') == 'duplicate':
+                                        refs = ', '.join(report.get('raw_paths', []))
+                                        self.log_signal.emit(
+                                            f"  ⚠️ 重名冲突已跳过 | MPJ引用: {refs}"
+                                        )
                             for layer in layers:
                                 tasks.append({'mapgis_path': layer['path'], 'output_subdir': ''})
                         except Exception as e:

@@ -1231,31 +1231,68 @@ class MapGISProjectReader:
         为每个图层解析出实际存在的文件路径（按优先级）。
         返回 list of dict：{'path': str, 'name': str, 'ext': str}
         重名冲突（同文件名不同目录且均存在）的图层会被跳过并打印警告。
+
+        副作用：
+          self.last_resolve_report — list of dict，每个图层一条记录：
+            {
+              'raw_paths': list[str],   # MPJ 中记录的原始路径
+              'tried_paths': list[str], # 实际尝试过的候选路径
+              'resolved': str | None,   # 最终解析结果（None 表示未找到）
+              'skip_reason': str,       # 跳过原因（'not_found' / 'duplicate' / ''）
+            }
         """
+        self.last_resolve_report = []
+        seen_names = {}  # basename.upper() → [resolved_path, ...]
+
+        # 第一轮：收集所有可解析路径 + 诊断信息
+        resolve_cache = {}  # id(layer) → (resolved, tried)
+        for layer in self.layers:
+            resolved, tried = self._resolve_one(layer)
+            resolve_cache[id(layer)] = (resolved, tried)
+            if resolved is not None:
+                basename = os.path.basename(resolved).upper()
+                seen_names.setdefault(basename, [])
+                seen_names[basename].append(resolved)
+
+        # 第二轮：过滤重名冲突，生成结果 + 诊断报告
         results = []
-        seen_names = {}  # basename → [path, ...]
-
         for layer in self.layers:
-            resolved = self._resolve_one(layer)
+            resolved, tried = resolve_cache[id(layer)]
+            raw_paths = layer.get('paths', [])
+
             if resolved is None:
-                print(f"[MPJ] 跳过（未找到）: {layer.get('paths', [])}")
+                report = {
+                    'raw_paths': raw_paths,
+                    'tried_paths': tried,
+                    'resolved': None,
+                    'skip_reason': 'not_found',
+                }
+                self.last_resolve_report.append(report)
+                print(f"[MPJ] 跳过（未找到）: {raw_paths} | 尝试过: {tried}")
                 continue
 
-            basename = os.path.basename(resolved).upper()
-            seen_names.setdefault(basename, [])
-            seen_names[basename].append(resolved)
-
-        # 过滤重名冲突（同名文件有多个不同路径都存在）
-        for layer in self.layers:
-            resolved = self._resolve_one(layer)
-            if resolved is None:
-                continue
             basename = os.path.basename(resolved).upper()
             candidates = seen_names.get(basename, [])
-            unique_paths = list(dict.fromkeys(candidates))  # 保持顺序去重
+            unique_paths = list(dict.fromkeys(candidates))
+
             if len(unique_paths) > 1:
+                report = {
+                    'raw_paths': raw_paths,
+                    'tried_paths': tried,
+                    'resolved': resolved,
+                    'skip_reason': 'duplicate',
+                }
+                self.last_resolve_report.append(report)
                 print(f"[MPJ] 跳过（重名冲突）: {basename} -> {unique_paths}")
                 continue
+
+            report = {
+                'raw_paths': raw_paths,
+                'tried_paths': tried,
+                'resolved': resolved,
+                'skip_reason': '',
+            }
+            self.last_resolve_report.append(report)
             results.append({
                 'path': resolved,
                 'name': os.path.splitext(os.path.basename(resolved))[0],
@@ -1339,44 +1376,51 @@ class MapGISProjectReader:
 
     def _resolve_one(self, layer: dict):
         """
-        按优先级解析图层路径：
-          1. 路径列表中的第一个路径（原始路径）如存在则直接返回
-          2. 相对于 MPJ 目录拼接每个候选路径
-          3. 在 MPJ 目录中递归搜索同名文件
-          4. 多个匹配则跳过（返回 None）
+        按优先级解析图层路径。
+        返回 (resolved_path_or_None, tried_paths_list)。
+
+        tried_paths 记录了所有实际测试过的候选路径，供上层诊断日志使用。
+
+        优先级：
+          1. 原始绝对路径直接存在
+          2. 相对于 MPJ 目录拼接（去掉 '.\' 前缀）
+          3. 同名文件在 MPJ 目录下递归搜索（大小写不敏感）
         """
         paths = layer.get('paths', [])
-        ext = layer.get('ext', '')
+        tried = []
 
         # 1. 原始路径 & 2. 相对路径
         for raw_path in paths:
             # 原始路径直接测试
+            tried.append(raw_path)
             if os.path.isfile(raw_path):
-                return raw_path
+                return raw_path, tried
             # 去掉前缀 '.\' 或 './' 后，相对于 mpj 目录
             clean = raw_path.lstrip('.').lstrip('/').lstrip('\\')
             candidate = os.path.join(self.mpj_dir, clean)
+            tried.append(candidate)
             if os.path.isfile(candidate):
-                return candidate
+                return candidate, tried
             # 也尝试大小写变种（Windows 路径在 macOS/Linux 上需忽略大小写）
             lower = os.path.join(self.mpj_dir, clean.lower())
             upper = os.path.join(self.mpj_dir, clean.upper())
             for alt in (lower, upper):
+                tried.append(alt)
                 if os.path.isfile(alt):
-                    return alt
+                    return alt, tried
 
-        # 3. 递归搜索同文件名
+        # 3. 递归搜索同文件名（大小写不敏感）
         if paths:
-            target_name = os.path.basename(paths[0]).upper()
+            target_names = {os.path.basename(p).upper() for p in paths if p}
             matches = []
             for root, dirs, files in os.walk(self.mpj_dir):
                 for fn in files:
-                    if fn.upper() == target_name:
+                    if fn.upper() in target_names:
                         matches.append(os.path.join(root, fn))
             if len(matches) == 1:
-                return matches[0]
+                return matches[0], tried
             elif len(matches) > 1:
-                # 多个匹配，由调用方决定是否跳过
-                return matches[0]  # 返回第一个，由 resolve_layer_paths 处理重名
+                # 多个匹配，由 resolve_layer_paths 处理重名逻辑
+                return matches[0], tried
 
-        return None
+        return None, tried

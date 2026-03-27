@@ -88,6 +88,53 @@ def _shape_prefix(shape_type: str) -> str:
     return 'pg_'
 
 
+def _sanitize_gdb_field_names(gdf, log_fn):
+    """Rename any GDB-unsafe column names before writing with pyogrio.
+
+    GDB field names must be ASCII alphanumeric + underscore, must not start
+    with a digit, and must be ≤ 64 characters.  Any column that already meets
+    these rules is left untouched.  Renames are logged so the user can see
+    what changed.
+
+    Note: this is intentionally *not* the SHP sanitiser from pymapgis.py,
+    which truncates names to 10 chars.  GDB allows up to 64 chars.
+    """
+    import geopandas as gpd
+
+    geom_col = gdf.geometry.name if hasattr(gdf, 'geometry') else 'geometry'
+    rename_map = {}
+    used = set()
+
+    for col in gdf.columns:
+        if col == geom_col:
+            continue
+
+        safe = re.sub(r'[^0-9A-Za-z_]', '_', str(col))
+        safe = re.sub(r'_+', '_', safe).strip('_')
+
+        if not safe:
+            safe = 'field'
+        if safe and safe[0].isdigit():
+            safe = f'f_{safe}'
+
+        safe = safe[:64]
+        base = safe
+        i = 1
+        while safe.lower() in used:
+            suffix = f'_{i}'
+            safe = (base[:64 - len(suffix)] + suffix)[:64]
+            i += 1
+
+        used.add(safe.lower())
+        if safe != col:
+            rename_map[col] = safe
+
+    if rename_map:
+        log_fn(f"ℹ️ GDB 字段名已规范化: {rename_map}")
+
+    return gdf.rename(columns=rename_map)
+
+
 # ---------------------------------------------------------------------------
 # GDB path helper
 # ---------------------------------------------------------------------------
@@ -252,6 +299,9 @@ def export_to_gdb(
     gdf_out = _normalise_geometry(gdf, shape_type, _log)
     if gdf_out.empty:
         raise ValueError("几何归一化后图层为空，跳过 GDB 写入")
+
+    # ── 4b. Sanitise field names for GDB (avoids pyogrio laundering warnings) ─
+    gdf_out = _sanitize_gdb_field_names(gdf_out, _log)
 
     # ── 5. Write feature class ───────────────────────────────────────────────
     fc_path = _write_feature_class(gdf_out, gdb, fc_name, shape_type, _log)
